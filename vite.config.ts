@@ -12,6 +12,13 @@ export default defineConfig(() => {
       },
     },
     server: {
+      allowedHosts: [
+        'e-rekap-pks-2026.ai.studio',
+        '.run.app',
+        '.asia-northeast1.run.app',
+        'localhost',
+        '127.0.0.1',
+      ],
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',

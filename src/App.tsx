@@ -31,6 +31,9 @@ import {
   Info,
   Calendar,
   Building2,
+  Menu,
+  ChevronUp,
+  ListChecks,
   ChevronDown,
   X,
   Eye,
@@ -49,14 +52,23 @@ import {
   FileText,
   Camera,
   Image as ImageIcon,
-  Loader2
+  Loader2,
+  Clock,
+  AlertCircle,
+  Phone,
+  Star,
+  BarChart3,
+  PieChart
 } from 'lucide-react';
+import { RegistrationFormsView } from './components/RegistrationFormsView';
+import { LogoSettingModal } from './components/LogoSettingModal';
+import { SchoolAccountManagerModal } from './components/SchoolAccountManagerModal';
 
 // ==========================================
 // TYPES & CRITERIA DEFINITIONS
 // ==========================================
 
-export type UserRole = 'admin' | 'juri' | 'user';
+export type UserRole = 'admin' | 'juri' | 'user' | 'sekolah';
 export type SchoolLevel = 'SLTP' | 'SLTA';
 
 export interface AppUser {
@@ -65,6 +77,10 @@ export interface AppUser {
   name: string;
   role: UserRole;
   isCustom?: boolean;
+  schoolName?: string;
+  schoolLevel?: SchoolLevel;
+  pembinaName?: string;
+  contactWa?: string;
 }
 
 export interface Criterion {
@@ -411,6 +427,7 @@ const STORAGE_KEY = 'PBB_PKS_REKAP_APP_V4_DATA';
 const CONFIG_STORAGE_KEY = 'PBB_PKS_CONFIG_V4_DATA';
 const USERS_STORAGE_KEY = 'PBB_PKS_USERS_V4_DATA';
 const AUTH_KEY = 'PBB_AUTH_CURRENT_USER';
+const LOGO_STORAGE_KEY = 'PBB_PKS_APP_CUSTOM_LOGO';
 
 // CONTOH DATA AWAL PESERTA
 const INITIAL_PESERTA: Participant[] = [
@@ -623,6 +640,7 @@ export default function App() {
 
   // User Management Modal State (Tambah User, Edit User & List User)
   const [modalUserOpen, setModalUserOpen] = useState(false);
+  const [modalSchoolAccountsOpen, setModalSchoolAccountsOpen] = useState(false);
   const [userFormTab, setUserFormTab] = useState<'list' | 'add' | 'edit'>('list');
   const [editingUserOriginalUsername, setEditingUserOriginalUsername] = useState<string | null>(null);
   const [userFormData, setUserFormData] = useState<{
@@ -630,16 +648,29 @@ export default function App() {
     password: string;
     name: string;
     role: UserRole;
+    schoolName?: string;
+    schoolLevel?: SchoolLevel;
+    pembinaName?: string;
+    contactWa?: string;
   }>({
     username: '',
     password: '',
     name: '',
-    role: 'juri'
+    role: 'juri',
+    schoolName: '',
+    schoolLevel: 'SLTP',
+    pembinaName: '',
+    contactWa: ''
   });
 
   // Modal Pratinjau & Cetak Format Blanko Lembar Penilaian Juri
   const [modalBlankSheetOpen, setModalBlankSheetOpen] = useState(false);
   const [blankSheetCatKey, setBlankSheetCatKey] = useState<CategoryKey>('pbb');
+
+  // Modal Daftar Nama Peserta & Sekolah (Siap Unduh & Cetak)
+  const [modalDaftarPesertaOpen, setModalDaftarPesertaOpen] = useState(false);
+  const [daftarPesertaFilterJenjang, setDaftarPesertaFilterJenjang] = useState<'all' | 'SLTP' | 'SLTA'>('all');
+  const [daftarPesertaSearch, setDaftarPesertaSearch] = useState('');
 
   const [modalPrintOpen, setModalPrintOpen] = useState(false);
   const [printPesertaId, setPrintPesertaId] = useState<string | null>(null);
@@ -672,6 +703,112 @@ export default function App() {
     uploadTime?: string;
     juriName?: string;
   } | null>(null);
+
+  // Sidebar Navigation & Collapsible Dropdown Accordions
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCatDropdownOpen, setSidebarCatDropdownOpen] = useState(true);
+  const [sidebarPesertaDropdownOpen, setSidebarPesertaDropdownOpen] = useState(true);
+  const [sidebarFormDropdownOpen, setSidebarFormDropdownOpen] = useState(true);
+  const [sidebarRekapDropdownOpen, setSidebarRekapDropdownOpen] = useState(true);
+  const [sidebarPesertaSearch, setSidebarPesertaSearch] = useState('');
+  const [sidebarPesertaJenjang, setSidebarPesertaJenjang] = useState<'all' | 'SLTP' | 'SLTA'>('all');
+
+  // Custom Application Logo State
+  const [appLogo, setAppLogo] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(LOGO_STORAGE_KEY) || null;
+    } catch {
+      return null;
+    }
+  });
+  const [modalLogoOpen, setModalLogoOpen] = useState(false);
+  const [tempLogoUrl, setTempLogoUrl] = useState('');
+
+  // School Self-Registration State (Layar Login)
+  const [authViewTab, setAuthViewTab] = useState<'login' | 'register_sekolah'>('login');
+  const [regJenjang, setRegJenjang] = useState<SchoolLevel>('SLTP');
+  const [regSekolah, setRegSekolah] = useState('');
+  const [regPembina, setRegPembina] = useState('');
+  const [regWa, setRegWa] = useState('');
+  const [regUsername, setRegUsername] = useState('');
+  const [regPassword, setRegPassword] = useState('');
+  const [regConfirmPassword, setRegConfirmPassword] = useState('');
+  const [regError, setRegError] = useState('');
+
+  // Dashboard School Progress Filter States
+  const [dashFilterJenjang, setDashFilterJenjang] = useState<'all' | 'SLTP' | 'SLTA'>('all');
+  const [dashSearchSekolah, setDashSearchSekolah] = useState('');
+
+  // State 4 Kerangka Form Pendaftaran Resmi PKS & Polisi Pelajar
+  const [formPolisiPelajar, setFormPolisiPelajar] = useState({
+    nama: 'Bintang Pratama',
+    nisn: '0089123456',
+    sekolah: 'SMP Negeri 1 Majalengka',
+    jenjang: 'SLTP' as SchoolLevel,
+    kelas: 'VIII-A',
+    ttl: 'Majalengka, 15 Januari 2012',
+    jk: 'Laki-Laki',
+    agama: 'Islam',
+    alamat: 'Jl. Pemuda No. 45, Majalengka',
+    noHp: '081234567890',
+    namaOrtu: 'Hendra Gunawan',
+    pekerjaanOrtu: 'Wiraswasta',
+    tinggiBadan: '165',
+    beratBadan: '52',
+    golDarah: 'O',
+    riwayatPenyakit: 'Tidak Ada',
+    prestasi: 'Juara 2 PBB Tingkat Kabupaten',
+    alasan: 'Ingin mengabdi dan menegakkan ketertiban dan keselamatan di lingkungan sekolah.'
+  });
+
+  const [formCalonPks, setFormCalonPks] = useState({
+    nama: 'Aisyah Putri Rahmadani',
+    nisn: '0078129845',
+    sekolah: 'SMA Negeri 1 Majalengka',
+    jenjang: 'SLTA' as SchoolLevel,
+    kelas: 'X-MIPA 2',
+    ttl: 'Majalengka, 22 April 2010',
+    jk: 'Perempuan',
+    agama: 'Islam',
+    alamat: 'Jl. Kartini No. 12, Majalengka',
+    noHp: '085712348900',
+    namaPembina: 'Drs. Supriyadi, M.Pd',
+    divisiMinat: 'Gatur Lantas & Keselamatan Jalan',
+    tinggiBadan: '160',
+    beratBadan: '48',
+    golDarah: 'A',
+    riwayatOrganisasi: 'Pramuka Penggalang Inti',
+    izinOrtu: true
+  });
+
+  const [formBalok1, setFormBalok1] = useState({
+    namaRegu: 'Regu Elang Sakti',
+    sekolah: 'SMP Negeri 1 Majalengka',
+    jenjang: 'SLTP' as SchoolLevel,
+    namaKetua: 'Fajar Nugraha',
+    jumlahAnggota: '12 Orang',
+    namaPembina: 'Ahmad Fauzi, S.Pd',
+    noHpPembina: '081398765432',
+    kategoriKemah: 'Balok 1 (Tingkat Dasar / Calon Kader PKS)',
+    lokasiPerkemahan: 'Bumi Perkemahan Sindangkasih, Majalengka',
+    tanggalKegiatan: '12 - 14 Juni 2026',
+    statusKesehatan: 'Semua anggota sehat dan siap kegiatan lapangan',
+    suratIzinKepsek: 'No. 421.3/089/SMPN1/2026'
+  });
+
+  const [formBalok2, setFormBalok2] = useState({
+    namaPeserta: 'Rizky Ramadhan',
+    sekolah: 'SMA Negeri 1 Majalengka',
+    jenjang: 'SLTA' as SchoolLevel,
+    kelas: 'XI-IPS 1',
+    noSertifikatBalok1: 'PKS-B1/POLRES-MJL/2025/084',
+    tahunKelulusanBalok1: '2025',
+    jabatanPleton: 'Komandan Pleton (Danton)',
+    namaPembina: 'Iptu Agus Salim',
+    materiUji: 'Penguasaan 12 Gerakan Gatur Lantas, PBB Tongkat, Senam Lantas, Bela Diri Praktis Polri',
+    rekomendasiSatlantas: 'Memenuhi Syarat Kualifikasi Instruktur PKS Balok 2'
+  });
 
   // Proteksi Hak Akses Akun Tamu: Hanya bisa melihat data mentah, otomatis dialihkan dari tab rekap
   useEffect(() => {
@@ -773,19 +910,297 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    setConfirmModal({
-      isOpen: true,
-      title: 'Konfirmasi Keluar',
-      message: 'Apakah Anda yakin ingin keluar dari sesi akun ini?',
-      confirmText: 'Keluar',
-      isDanger: false,
-      onConfirm: () => {
-        sessionStorage.removeItem(AUTH_KEY);
-        setCurrentUser(null);
-        setConfirmModal(prev => ({ ...prev, isOpen: false }));
-        showToast('Anda telah keluar.');
+    setCurrentUser(null);
+    sessionStorage.removeItem(AUTH_KEY);
+    showToast('Berhasil keluar dari akun.', 'info');
+  };
+
+  // School Self-Registration Handler
+  const handleRegisterSchool = (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegError('');
+
+    if (!regSekolah.trim()) {
+      setRegError('Nama lengkap sekolah wajib diisi!');
+      return;
+    }
+    if (!regUsername.trim()) {
+      setRegError('Username wajib diisi!');
+      return;
+    }
+    if (regPassword.length < 4) {
+      setRegError('Password minimal 4 karakter!');
+      return;
+    }
+    if (regPassword !== regConfirmPassword) {
+      setRegError('Konfirmasi password tidak sesuai!');
+      return;
+    }
+
+    const usernameLower = regUsername.trim().toLowerCase();
+    if (usersList.some(u => u.username.toLowerCase() === usernameLower)) {
+      setRegError(`Username "${regUsername}" sudah digunakan oleh akun lain. Silakan pilih username lain.`);
+      return;
+    }
+
+    const newSchoolUser: AppUser = {
+      username: usernameLower,
+      password: regPassword,
+      name: `${regSekolah.trim()}`,
+      role: 'sekolah',
+      schoolName: regSekolah.trim(),
+      schoolLevel: regJenjang,
+      pembinaName: regPembina.trim(),
+      contactWa: regWa.trim(),
+      isCustom: true
+    };
+
+    const updatedUsers = [...usersList, newSchoolUser];
+    setUsersList(updatedUsers);
+    try {
+      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(updatedUsers));
+    } catch {
+      // ignore
+    }
+
+    // Auto-create or link a participant profile for this school
+    const schoolExists = pesertaList.some(
+      p => p.sekolah.toLowerCase().trim() === regSekolah.trim().toLowerCase()
+    );
+    if (!schoolExists) {
+      const nextNomor = String(pesertaList.length + 1).padStart(2, '0');
+      const newParticipant: Participant = {
+        id: `p-${Date.now()}`,
+        nomor: nextNomor,
+        peleton: `Peleton ${regSekolah.trim()}`,
+        jenjang: regJenjang,
+        sekolah: regSekolah.trim(),
+        tanggal: new Date().toISOString().split('T')[0],
+        juri: 'Belum Ditentukan',
+        scores: {
+          pbb: {}, variasi: {}, formasi: {}, danton: {},
+          devile: {}, gatur: {}, senam: {}, yelyel: {},
+          beladiri: {}, speaking: {}, tenda: {}
+        }
+      };
+      const updatedPeserta = [...pesertaList, newParticipant];
+      setPesertaList(updatedPeserta);
+      setActivePesertaId(newParticipant.id);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedPeserta, history: [] }));
+      } catch {
+        // ignore
       }
-    });
+    }
+
+    setCurrentUser(newSchoolUser);
+    try {
+      sessionStorage.setItem(AUTH_KEY, JSON.stringify(newSchoolUser));
+    } catch {
+      // ignore
+    }
+    showToast(`Registrasi Akun Sekolah ${regSekolah} berhasil! Selamat datang.`, 'success');
+  };
+
+  // Logo Handlers
+  const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      showToast('Harap pilih file gambar (PNG, JPG, SVG, atau WebP)', 'error');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      setAppLogo(dataUrl);
+      try {
+        localStorage.setItem(LOGO_STORAGE_KEY, dataUrl);
+      } catch (err) {
+        console.error('Storage error', err);
+      }
+      showToast('Logo aplikasi berhasil diperbarui!', 'success');
+      setModalLogoOpen(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleResetLogo = () => {
+    setAppLogo(null);
+    try {
+      localStorage.removeItem(LOGO_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    showToast('Logo dikembalikan ke lambang default PKS.', 'info');
+    setModalLogoOpen(false);
+  };
+
+  const handleSaveLogoUrl = (customLogo?: string) => {
+    const logoToSave = customLogo || tempLogoUrl.trim();
+    if (!logoToSave) return;
+    setAppLogo(logoToSave);
+    try {
+      localStorage.setItem(LOGO_STORAGE_KEY, logoToSave);
+    } catch {
+      // ignore
+    }
+    showToast('Logo aplikasi berhasil diperbarui!', 'success');
+    setTempLogoUrl('');
+    setModalLogoOpen(false);
+  };
+
+  // Export 4 Registration Forms to Excel (.xlsx)
+  const handleExportFormPolisiPelajarExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const rows = [
+      ['FORMULIR PENDAFTARAN RESMI POLISI PELAJAR (POLJAR) TAHUN 2026'],
+      ['DINAS PENDIDIKAN & KEBUDAYAAN KABUPATEN BEKERJASAMA DENGAN SATLANTAS POLRES'],
+      [''],
+      ['A. IDENTITAS PRIBADI SISWA'],
+      ['1. Nama Lengkap', formPolisiPelajar.nama],
+      ['2. NISN', formPolisiPelajar.nisn],
+      ['3. Asal Sekolah', formPolisiPelajar.sekolah],
+      ['4. Jenjang / Tingkat', formPolisiPelajar.jenjang],
+      ['5. Kelas', formPolisiPelajar.kelas],
+      ['6. Tempat, Tanggal Lahir', formPolisiPelajar.ttl],
+      ['7. Jenis Kelamin', formPolisiPelajar.jk],
+      ['8. Agama', formPolisiPelajar.agama],
+      ['9. Alamat Lengkap Siswa', formPolisiPelajar.alamat],
+      ['10. No. Handphone / WhatsApp', formPolisiPelajar.noHp],
+      ['11. Nama Orang Tua / Wali', formPolisiPelajar.namaOrtu],
+      ['12. Pekerjaan Orang Tua', formPolisiPelajar.pekerjaanOrtu],
+      [''],
+      ['B. DATA FISIK & KESEHATAN'],
+      ['1. Tinggi Badan (cm)', formPolisiPelajar.tinggiBadan],
+      ['2. Berat Badan (kg)', formPolisiPelajar.beratBadan],
+      ['3. Golongan Darah', formPolisiPelajar.golDarah],
+      ['4. Riwayat Penyakit / Alergi', formPolisiPelajar.riwayatPenyakit],
+      [''],
+      ['C. MOTIVASI & PRESTASI'],
+      ['1. Prestasi yang Pernah Diraih', formPolisiPelajar.prestasi],
+      ['2. Alasan Mengikuti Poljar', formPolisiPelajar.alasan],
+      [''],
+      ['Mengetahui,', '', 'Majalengka, ' + new Date().toLocaleDateString('id-ID')],
+      ['Orang Tua / Wali Siswa', '', 'Calon Siswa Polisi Pelajar'],
+      [''],
+      [''],
+      [`(${formPolisiPelajar.namaOrtu})`, '', `(${formPolisiPelajar.nama})`]
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 32 }, { wch: 45 }, { wch: 30 }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Pendaftaran_Poljar');
+    XLSX.writeFile(wb, `Form_Pendaftaran_Polisi_Pelajar_${formPolisiPelajar.nama.replace(/\s+/g, '_')}.xlsx`);
+    showToast('Form Pendaftaran Polisi Pelajar berhasil diunduh (.xlsx)', 'success');
+  };
+
+  const handleExportFormCalonPksExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const rows = [
+      ['FORMULIR PENDAFTARAN CALON ANGGOTA PATROLI KEAMANAN SEKOLAH (PKS)'],
+      ['KORPS PKS TINGKAT SLTP & SLTA TAHUN AJARAN 2026/2027'],
+      [''],
+      ['A. IDENTITAS CALON ANGGOTA'],
+      ['1. Nama Lengkap', formCalonPks.nama],
+      ['2. NISN', formCalonPks.nisn],
+      ['3. Pangkalan Sekolah', formCalonPks.sekolah],
+      ['4. Jenjang', formCalonPks.jenjang],
+      ['5. Kelas', formCalonPks.kelas],
+      ['6. Tempat, Tanggal Lahir', formCalonPks.ttl],
+      ['7. Jenis Kelamin', formCalonPks.jk],
+      ['8. Agama', formCalonPks.agama],
+      ['9. Alamat Lengkap', formCalonPks.alamat],
+      ['10. No. Handphone', formCalonPks.noHp],
+      ['11. Pembina PKS Sekolah', formCalonPks.namaPembina],
+      ['12. Pilihan Divisi Peminatan', formCalonPks.divisiMinat],
+      [''],
+      ['B. FISIK & PENGALAMAN'],
+      ['1. Tinggi / Berat Badan', `${formCalonPks.tinggiBadan} cm / ${formCalonPks.beratBadan} kg`],
+      ['2. Golongan Darah', formCalonPks.golDarah],
+      ['3. Riwayat Organisasi', formCalonPks.riwayatOrganisasi],
+      ['4. Izin Orang Tua', formCalonPks.izinOrtu ? 'Sudah Mendapatkan Izin' : 'Belum'],
+      [''],
+      ['Mengetahui,', '', 'Majalengka, ' + new Date().toLocaleDateString('id-ID')],
+      ['Pembina PKS Sekolah', '', 'Calon Anggota PKS'],
+      [''],
+      [''],
+      [`(${formCalonPks.namaPembina})`, '', `(${formCalonPks.nama})`]
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 32 }, { wch: 45 }, { wch: 30 }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Pendaftaran_PKS');
+    XLSX.writeFile(wb, `Form_Calon_Anggota_PKS_${formCalonPks.nama.replace(/\s+/g, '_')}.xlsx`);
+    showToast('Form Pendaftaran Calon PKS berhasil diunduh (.xlsx)', 'success');
+  };
+
+  const handleExportFormBalok1Excel = () => {
+    const wb = XLSX.utils.book_new();
+    const rows = [
+      ['FORMULIR PENDAFTARAN PERKEMAHAN PELANTIKAN PKS TINGKAT DASAR (BALOK 1)'],
+      ['DIKLAT DASAR KEPEMIMPINAN DAN KELALULINTASAN PELAJAR TAHUN 2026'],
+      [''],
+      ['A. DATA REGU / KONTINGEN SEKOLAH'],
+      ['1. Nama Regu / Peleton', formBalok1.namaRegu],
+      ['2. Pangkalan Sekolah', formBalok1.sekolah],
+      ['3. Tingkat / Jenjang', formBalok1.jenjang],
+      ['4. Nama Ketua Regu', formBalok1.namaKetua],
+      ['5. Jumlah Anggota Regu', formBalok1.jumlahAnggota],
+      ['6. Pembina Pendamping', formBalok1.namaPembina],
+      ['7. No. Kontak Pembina', formBalok1.noHpPembina],
+      [''],
+      ['B. DETAIL KEGIATAN PERKEMAHAN'],
+      ['1. Tingkat Pelantikan', formBalok1.kategoriKemah],
+      ['2. Lokasi Perkemahan', formBalok1.lokasiPerkemahan],
+      ['3. Waktu Pelaksanaan', formBalok1.tanggalKegiatan],
+      ['4. Status Kesehatan Regu', formBalok1.statusKesehatan],
+      ['5. Surat Rekomendasi Kepala Sekolah', formBalok1.suratIzinKepsek],
+      [''],
+      ['Mengetahui,', '', 'Didaftarkan Oleh,'],
+      ['Kepala Sekolah / Pangkalan', '', 'Pembina Pendamping PKS'],
+      [''],
+      [''],
+      ['(....................................)', '', `(${formBalok1.namaPembina})`]
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 35 }, { wch: 45 }, { wch: 30 }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Perkemahan_Balok1');
+    XLSX.writeFile(wb, `Form_Perkemahan_Balok1_${formBalok1.sekolah.replace(/\s+/g, '_')}.xlsx`);
+    showToast('Form Perkemahan PKS Balok 1 berhasil diunduh (.xlsx)', 'success');
+  };
+
+  const handleExportFormBalok2Excel = () => {
+    const wb = XLSX.utils.book_new();
+    const rows = [
+      ['FORMULIR PENDAFTARAN PERKEMAHAN TINGKAT LANJUTAN (BALOK 2)'],
+      ['DIKLAT KEPEMIMPINAN KOMANDAN REGU & INSTRUKTUR PKS TAHUN 2026'],
+      [''],
+      ['A. DATA CALON KADER BALOK 2'],
+      ['1. Nama Lengkap Peserta', formBalok2.namaPeserta],
+      ['2. Pangkalan Sekolah', formBalok2.sekolah],
+      ['3. Jenjang / Tingkat', formBalok2.jenjang],
+      ['4. Kelas', formBalok2.kelas],
+      ['5. No. Sertifikat Balok 1', formBalok2.noSertifikatBalok1],
+      ['6. Tahun Kelulusan Balok 1', formBalok2.tahunKelulusanBalok1],
+      ['7. Jabatan Saat Ini', formBalok2.jabatanPleton],
+      ['8. Pembina Rekomendasi', formBalok2.namaPembina],
+      [''],
+      ['B. MATERI UJI KOMPETENSI PRASYARAT'],
+      ['1. Materi Pengujian', formBalok2.materiUji],
+      ['2. Rekomendasi Satlantas/Polres', formBalok2.rekomendasiSatlantas],
+      [''],
+      ['Mengetahui,', '', 'Pemohon Calon Balok 2,'],
+      ['Instruktur Satlantas / Pembina', '', 'Peserta Diklat Lanjutan'],
+      [''],
+      [''],
+      [`(${formBalok2.namaPembina})`, '', `(${formBalok2.namaPeserta})`]
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 35 }, { wch: 45 }, { wch: 30 }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Pendaftaran_Balok2');
+    XLSX.writeFile(wb, `Form_Pendaftaran_PKS_Balok2_${formBalok2.namaPeserta.replace(/\s+/g, '_')}.xlsx`);
+    showToast('Form Pendaftaran PKS Balok 2 berhasil diunduh (.xlsx)', 'success');
   };
 
   // User Management Handlers (Admin Only)
@@ -795,7 +1210,11 @@ export default function App() {
       username: u.username,
       password: u.password || '',
       name: u.name,
-      role: u.role
+      role: u.role,
+      schoolName: u.schoolName || (u.role === 'sekolah' ? u.name : ''),
+      schoolLevel: u.schoolLevel || 'SLTP',
+      pembinaName: u.pembinaName || '',
+      contactWa: u.contactWa || ''
     });
     setUserFormTab('edit');
   };
@@ -806,7 +1225,11 @@ export default function App() {
       username: '',
       password: '',
       name: '',
-      role: 'juri'
+      role: 'juri',
+      schoolName: '',
+      schoolLevel: 'SLTP',
+      pembinaName: '',
+      contactWa: ''
     });
     setUserFormTab('list');
   };
@@ -841,7 +1264,11 @@ export default function App() {
       password: finalPassword,
       name: dname,
       role: editingUserOriginalUsername === 'admin' ? 'admin' : userFormData.role,
-      isCustom: originalUser?.isCustom ?? true
+      isCustom: originalUser?.isCustom ?? true,
+      schoolName: userFormData.role === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : originalUser?.schoolName,
+      schoolLevel: userFormData.role === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : originalUser?.schoolLevel,
+      pembinaName: userFormData.role === 'sekolah' ? userFormData.pembinaName?.trim() : originalUser?.pembinaName,
+      contactWa: userFormData.role === 'sekolah' ? userFormData.contactWa?.trim() : originalUser?.contactWa
     };
 
     setUsersList(prev =>
@@ -859,7 +1286,11 @@ export default function App() {
       username: '',
       password: '',
       name: '',
-      role: 'juri'
+      role: 'juri',
+      schoolName: '',
+      schoolLevel: 'SLTP',
+      pembinaName: '',
+      contactWa: ''
     });
     setUserFormTab('list');
     showToast(`Akun "${dname}" dan password berhasil diperbarui!`);
@@ -886,7 +1317,11 @@ export default function App() {
       password: pwd,
       name: dname,
       role: userFormData.role,
-      isCustom: true
+      isCustom: true,
+      schoolName: userFormData.role === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : undefined,
+      schoolLevel: userFormData.role === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : undefined,
+      pembinaName: userFormData.role === 'sekolah' ? userFormData.pembinaName?.trim() : undefined,
+      contactWa: userFormData.role === 'sekolah' ? userFormData.contactWa?.trim() : undefined
     };
 
     setUsersList(prev => [...prev, newUser]);
@@ -894,7 +1329,11 @@ export default function App() {
       username: '',
       password: '',
       name: '',
-      role: 'juri'
+      role: 'juri',
+      schoolName: '',
+      schoolLevel: 'SLTP',
+      pembinaName: '',
+      contactWa: ''
     });
     setUserFormTab('list');
     showToast(`Pengguna baru "${dname}" (${newUser.role.toUpperCase()}) berhasil dibuat!`);
@@ -937,10 +1376,128 @@ export default function App() {
     return categories.find(c => c.key === currentTab) || null;
   }, [categories, currentTab]);
 
+  // Live Map of Participant Totals & Completed Categories for Sidebar Badges
+  const pesertaSummariesMap = useMemo(() => {
+    const map: Record<string, { totalPoints: number; isComplete: boolean; completedCats: number }> = {};
+    pesertaList.forEach(p => {
+      const calc = calculateAllCategories(p, categories);
+      map[p.id] = {
+        totalPoints: calc ? calc.grandTotal : 0,
+        isComplete: calc ? calc.isFullyCompleted : false,
+        completedCats: calc ? calc.completedCategoriesCount : 0
+      };
+    });
+    return map;
+  }, [pesertaList, categories]);
+
+  // Filtered Participants specifically for Sidebar Dropdown
+  const filteredSidebarPeserta = useMemo(() => {
+    return pesertaList.filter(p => {
+      const matchSchool =
+        currentUser?.role === 'sekolah' && currentUser.schoolName
+          ? p.sekolah.toLowerCase().trim() === currentUser.schoolName.toLowerCase().trim()
+          : true;
+
+      const matchSearch =
+        sidebarPesertaSearch.trim() === '' ||
+        p.nomor.toLowerCase().includes(sidebarPesertaSearch.toLowerCase()) ||
+        p.sekolah.toLowerCase().includes(sidebarPesertaSearch.toLowerCase()) ||
+        (p.peleton && p.peleton.toLowerCase().includes(sidebarPesertaSearch.toLowerCase()));
+
+      const matchJenjang =
+        sidebarPesertaJenjang === 'all' || p.jenjang === sidebarPesertaJenjang;
+
+      return matchSchool && matchSearch && matchJenjang;
+    });
+  }, [pesertaList, sidebarPesertaSearch, sidebarPesertaJenjang, currentUser]);
+
+  // Calculation of School Assessment Progress for the Dashboard Chart
+  const dashboardProgressStats = useMemo(() => {
+    const list = pesertaList.filter(p => {
+      const matchSchool =
+        currentUser?.role === 'sekolah' && currentUser.schoolName
+          ? p.sekolah.toLowerCase().trim() === currentUser.schoolName.toLowerCase().trim()
+          : true;
+      const matchJenjang = dashFilterJenjang === 'all' || p.jenjang === dashFilterJenjang;
+      const matchSearch = dashSearchSekolah.trim() === '' ||
+        p.sekolah.toLowerCase().includes(dashSearchSekolah.toLowerCase()) ||
+        (p.peleton && p.peleton.toLowerCase().includes(dashSearchSekolah.toLowerCase()));
+      return matchSchool && matchJenjang && matchSearch;
+    });
+
+    const totalRegistered = list.length;
+    let completedCount = 0;
+    let inProgressCount = 0;
+    let unscoredCount = 0;
+    let totalCompletedCats = 0;
+
+    const schoolProgressList = list.map(p => {
+      const calc = calculateAllCategories(p, categories);
+      const isComplete = calc ? calc.isFullyCompleted : false;
+      const completedCats = calc ? calc.completedCategoriesCount : 0;
+      const grandTotal = calc ? calc.grandTotal : 0;
+      const maxGrandTotal = calc ? calc.maxGrandTotal : 0;
+      const pct = maxGrandTotal > 0 ? (grandTotal / maxGrandTotal) * 100 : 0;
+
+      totalCompletedCats += completedCats;
+      if (isComplete) {
+        completedCount++;
+      } else if (completedCats > 0) {
+        inProgressCount++;
+      } else {
+        unscoredCount++;
+      }
+
+      return {
+        participant: p,
+        calc,
+        isComplete,
+        completedCats,
+        grandTotal,
+        maxGrandTotal,
+        pct
+      };
+    });
+
+    const completionRate = totalRegistered > 0 ? Math.round((completedCount / totalRegistered) * 100) : 0;
+    const avgCompletedCats = totalRegistered > 0 ? (totalCompletedCats / totalRegistered) : 0;
+
+    return {
+      totalRegistered,
+      completedCount,
+      inProgressCount,
+      unscoredCount,
+      completionRate,
+      avgCompletedCats,
+      schoolProgressList
+    };
+  }, [pesertaList, categories, dashFilterJenjang, dashSearchSekolah, currentUser]);
+
+  // Quick navigation to previous / next participant
+  const handlePrevPeserta = () => {
+    if (pesertaList.length === 0) return;
+    const currentIndex = pesertaList.findIndex(p => p.id === activePesertaId);
+    if (currentIndex > 0) {
+      setActivePesertaId(pesertaList[currentIndex - 1].id);
+    } else {
+      setActivePesertaId(pesertaList[pesertaList.length - 1].id);
+    }
+  };
+
+  const handleNextPeserta = () => {
+    if (pesertaList.length === 0) return;
+    const currentIndex = pesertaList.findIndex(p => p.id === activePesertaId);
+    if (currentIndex >= 0 && currentIndex < pesertaList.length - 1) {
+      setActivePesertaId(pesertaList[currentIndex + 1].id);
+    } else {
+      setActivePesertaId(pesertaList[0].id);
+    }
+  };
+
   // Handle Score Selection
   const handleScoreSelect = (categoryKey: CategoryKey, criterionNo: number, val: number | null) => {
-    if (!currentUser || currentUser.role === 'user') {
-      showToast('Akses ditolak: Akun Tamu / User tidak dapat mengubah nilai!', 'error');
+    if (!currentUser || currentUser.role === 'user' || currentUser.role === 'sekolah') {
+      showToast('Akses ditolak: Penginputan nilai hanya dapat dilakukan oleh Panitia / Juri!', 'error');
       return;
     }
     if (!activePesertaId) return;
@@ -1164,8 +1721,8 @@ export default function App() {
     setPesertaFormData({
       nomor: nextNo,
       peleton: '', // Opsional
-      jenjang: 'SLTP',
-      sekolah: '',
+      jenjang: currentUser.role === 'sekolah' && currentUser.schoolLevel ? currentUser.schoolLevel : 'SLTP',
+      sekolah: currentUser.role === 'sekolah' && currentUser.schoolName ? currentUser.schoolName : '',
       tanggal: new Date().toISOString().split('T')[0],
       juri: currentUser.role === 'juri' ? currentUser.name : 'Aiptu Budi Santoso (Juri Lapangan)'
     });
@@ -1175,6 +1732,10 @@ export default function App() {
 
   const openEditPesertaModal = (p: Participant) => {
     if (!currentUser || currentUser.role === 'user') return;
+    if (currentUser.role === 'sekolah' && currentUser.schoolName && p.sekolah.toLowerCase().trim() !== currentUser.schoolName.toLowerCase().trim()) {
+      showToast('Akses ditolak: Anda hanya dapat mengelola peserta sekolah Anda sendiri!', 'error');
+      return;
+    }
     setPesertaFormData({
       nomor: p.nomor,
       peleton: p.peleton || '',
@@ -2003,6 +2564,109 @@ export default function App() {
     showToast('Master format blanko seluruh 11 kriteria penilaian berhasil diunduh!');
   };
 
+  // 6. Unduh Daftar Nama Peserta & Sekolah Terdaftar (.xlsx)
+  const handleExportDaftarPesertaExcel = (filterJenjang: 'all' | 'SLTP' | 'SLTA' = 'all') => {
+    if (pesertaList.length === 0) {
+      showToast('Belum ada data peserta untuk diunduh!', 'error');
+      return;
+    }
+
+    const filtered = pesertaList.filter(p => {
+      if (filterJenjang === 'all') return true;
+      return (p.jenjang || 'SLTP') === filterJenjang;
+    });
+
+    const rows: (string | number)[][] = [
+      ['PANITIA PELAKSANA LOMBA PATROLI KEAMANAN SEKOLAH (PKS) TAHUN 2026'],
+      ['DAFTAR RESMI NAMA PESERTA & KONTINGEN SEKOLAH TERDAFTAR'],
+      [`Tingkat / Jenjang: ${filterJenjang === 'all' ? 'SEMUA TINGKAT (SLTP & SLTA)' : filterJenjang}`],
+      [`Jumlah Kontingen: ${filtered.length} Peserta | Tanggal Unduh: ${new Date().toLocaleDateString('id-ID')}`],
+      [''],
+      [
+        'No.',
+        'No. Peserta',
+        'Jenjang / Tingkat',
+        'Nama Sekolah / Instansi',
+        'Nama Peleton / Regu',
+        'Hari / Tanggal Tampil',
+        'Nama Juri Penilai',
+        'Kelengkapan Penilaian',
+        'Total Nilai Sementara',
+        'Persentase (%)',
+        'Status Penilaian'
+      ]
+    ];
+
+    filtered.forEach((p, idx) => {
+      const calc = calculateAllCategories(p, categories);
+      const isComplete = calc?.mandatoryCompleted;
+      const count = calc?.completedCategoriesCount || 0;
+      const total = categories.length;
+      const grandTotal = calc?.grandTotal || 0;
+      const pct = calc?.grandPct || 0;
+
+      rows.push([
+        idx + 1,
+        p.nomor,
+        p.jenjang || 'SLTP',
+        p.sekolah,
+        p.peleton || '-',
+        p.tanggal,
+        p.juri,
+        `${count} / ${total} Kategori`,
+        grandTotal,
+        Number(pct.toFixed(2)),
+        isComplete ? 'Selesai Dinilai (Lengkap)' : (count > 0 ? 'Sedang Berjalan' : 'Belum Dinilai')
+      ]);
+    });
+
+    rows.push(['']);
+    rows.push([
+      '',
+      '',
+      '',
+      `TOTAL KONTINGEN TERDAFTAR: ${filtered.length} SEKOLAH / REGU`,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      ''
+    ]);
+    rows.push(['']);
+    rows.push(['', '', '', '', '', '', '', '', 'Mengetahui,']);
+    rows.push(['', '', '', '', '', '', '', '', 'Ketua Panitia Pelaksana']);
+    rows.push(['']);
+    rows.push(['']);
+    rows.push(['', '', '', '', '', '', '', '', '( .................................................... )']);
+
+    const worksheet = XLSX.utils.aoa_to_sheet(rows);
+    worksheet['!cols'] = [
+      { wch: 6 },   // No
+      { wch: 14 },  // No Peserta
+      { wch: 18 },  // Jenjang
+      { wch: 38 },  // Sekolah
+      { wch: 25 },  // Peleton
+      { wch: 22 },  // Tanggal
+      { wch: 30 },  // Juri
+      { wch: 24 },  // Kelengkapan
+      { wch: 22 },  // Nilai
+      { wch: 16 },  // Pct
+      { wch: 28 }   // Status
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    const sheetName = filterJenjang === 'all' ? 'Daftar Peserta & Sekolah' : `Peserta ${filterJenjang}`;
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName.slice(0, 31));
+
+    XLSX.writeFile(
+      workbook,
+      `Daftar_Nama_Peserta_Sekolah_Lomba_PKS_${filterJenjang}_${new Date().toISOString().slice(0, 10)}.xlsx`
+    );
+    showToast(`Daftar ${filtered.length} nama peserta & sekolah (${filterJenjang.toUpperCase()}) berhasil diunduh!`);
+  };
+
   // Selected participant for Print Modal
   const printTargetParticipant = useMemo(() => {
     if (!printPesertaId) return null;
@@ -2040,102 +2704,303 @@ export default function App() {
   }, [categories, rekapSelectedCategoryKey]);
 
   // ==========================================
-  // RENDER: LOGIN SCREEN (IF NOT LOGGED IN)
+  // RENDER: LOGIN & REGISTRATION SCREEN (IF NOT LOGGED IN)
   // ==========================================
   if (!currentUser) {
     return (
-      <div className="fixed inset-0 z-50 bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-700/30">
-          <div className="bg-slate-900 text-white text-center p-6 border-b border-slate-800">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 text-white shadow-lg mb-3">
-              <Shield className="w-8 h-8" />
+      <div className="fixed inset-0 z-50 bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 flex items-center justify-center p-4 overflow-y-auto">
+        <div className="bg-white rounded-3xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-700/30 my-8">
+          {/* Header Card with Custom Logo / Shield */}
+          <div className="bg-slate-900 text-white text-center p-6 border-b border-slate-800 relative">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-slate-800 border border-slate-700 text-white shadow-lg mb-3 p-2">
+              {appLogo ? (
+                <img src={appLogo} alt="Logo Aplikasi" className="w-full h-full object-contain" />
+              ) : (
+                <Shield className="w-8 h-8 text-blue-400" />
+              )}
             </div>
-            <h2 className="text-xl font-extrabold tracking-tight uppercase">Sistem Rekapitulasi Lomba</h2>
-            <p className="text-xs text-blue-300 font-medium mt-0.5">Penilaian Terpadu PBB, PKS & Kreasi (SLTP / SLTA)</p>
+            <h2 className="text-xl font-extrabold tracking-tight uppercase">Sistem Rekapitulasi Lomba PBB & PKS</h2>
+            <p className="text-xs text-blue-300 font-medium mt-0.5">Penilaian Terpadu & Administrasi PKS (SLTP / SLTA)</p>
+
+            {/* Segmented Tab: Masuk vs Daftar Sekolah */}
+            <div className="flex items-center p-1 bg-slate-950/80 rounded-xl mt-4 max-w-xs mx-auto border border-slate-800">
+              <button
+                type="button"
+                onClick={() => setAuthViewTab('login')}
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                  authViewTab === 'login'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <LogIn className="w-3.5 h-3.5" /> Masuk Akun
+              </button>
+              <button
+                type="button"
+                onClick={() => setAuthViewTab('register_sekolah')}
+                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                  authViewTab === 'register_sekolah'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Building2 className="w-3.5 h-3.5" /> Daftar Sekolah
+              </button>
+            </div>
           </div>
 
-          <form onSubmit={handleLoginSubmit} className="p-6 space-y-4">
-            {loginError && (
-              <div className="bg-rose-50 border-l-4 border-rose-500 p-3 rounded-r text-xs text-rose-700 flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
-                <span>Username atau password tidak cocok! Silakan periksa kembali.</span>
+          {authViewTab === 'login' ? (
+            /* TAB 1: FORM LOGIN */
+            <form onSubmit={handleLoginSubmit} className="p-6 space-y-4">
+              {loginError && (
+                <div className="bg-rose-50 border-l-4 border-rose-500 p-3 rounded-r text-xs text-rose-700 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+                  <span>Username atau password tidak cocok! Silakan periksa kembali.</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Username</label>
+                <div className="relative">
+                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                  <input
+                    type="text"
+                    required
+                    value={loginUsername}
+                    onChange={e => setLoginUsername(e.target.value)}
+                    placeholder="Masukkan username"
+                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  />
+                </div>
               </div>
-            )}
 
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Username</label>
-              <div className="relative">
-                <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="text"
-                  required
-                  value={loginUsername}
-                  onChange={e => setLoginUsername(e.target.value)}
-                  placeholder="Masukkan username"
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                />
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Password</label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                  <input
+                    type="password"
+                    required
+                    value={loginPassword}
+                    onChange={e => setLoginPassword(e.target.value)}
+                    placeholder="Masukkan password"
+                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  />
+                </div>
               </div>
-            </div>
 
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Password</label>
-              <div className="relative">
-                <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                <input
-                  type="password"
-                  required
-                  value={loginPassword}
-                  onChange={e => setLoginPassword(e.target.value)}
-                  placeholder="Masukkan password"
-                  className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                />
-              </div>
-            </div>
+              <button
+                type="submit"
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <LogIn className="w-4 h-4" /> Masuk ke Aplikasi
+              </button>
 
-            <button
-              type="submit"
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <LogIn className="w-4 h-4" /> Masuk ke Aplikasi
-            </button>
-
-            {/* Quick Demo Login */}
-            <div className="pt-4 border-t border-slate-200 text-center">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
-                Akun Demo Bawaan:
-              </span>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="text-center pt-1">
                 <button
                   type="button"
-                  onClick={() => handleQuickLogin('admin')}
-                  className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
+                  onClick={() => setAuthViewTab('register_sekolah')}
+                  className="text-xs font-bold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer"
                 >
-                  <Shield className="w-4 h-4" />
-                  <span>Admin</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleQuickLogin('juri')}
-                  className="bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
-                >
-                  <UserCheck className="w-4 h-4" />
-                  <span>Juri</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleQuickLogin('user')}
-                  className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
-                >
-                  <Eye className="w-4 h-4" />
-                  <span>User / Tamu</span>
+                  Belum punya akun? Daftarkan Sekolah Anda secara mandiri di sini →
                 </button>
               </div>
-            </div>
-          </form>
+
+              {/* Quick Demo Login */}
+              <div className="pt-4 border-t border-slate-200 text-center">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
+                  Pilihan Masuk Cepat (Akun Demo):
+                </span>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleQuickLogin('admin')}
+                    className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
+                  >
+                    <Shield className="w-4 h-4" />
+                    <span>Admin</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleQuickLogin('juri')}
+                    className="bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
+                  >
+                    <UserCheck className="w-4 h-4" />
+                    <span>Juri</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleQuickLogin('user')}
+                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
+                  >
+                    <Eye className="w-4 h-4" />
+                    <span>User / Tamu</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          ) : (
+            /* TAB 2: FORM REGISTRASI MANDIRI SEKOLAH */
+            <form onSubmit={handleRegisterSchool} className="p-6 space-y-3.5">
+              <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-xs text-emerald-800">
+                <p className="font-bold">Pendaftaran Akun Mandiri Perwakilan Sekolah</p>
+                <p className="text-[11px] text-emerald-700 mt-0.5">
+                  Akun ini dapat digunakan untuk mengelola data peserta, kontingen, dan mengisi formulir pendaftaran resmi PKS untuk sekolah Anda.
+                </p>
+              </div>
+
+              {regError && (
+                <div className="bg-rose-50 border-l-4 border-rose-500 p-2.5 rounded-r text-xs text-rose-700 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+                  <span>{regError}</span>
+                </div>
+              )}
+
+              {/* Jenjang */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Tingkat / Jenjang Sekolah</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRegJenjang('SLTP')}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold border transition cursor-pointer flex items-center justify-center gap-2 ${
+                      regJenjang === 'SLTP'
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span>SLTP (SMP / MTs)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRegJenjang('SLTA')}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold border transition cursor-pointer flex items-center justify-center gap-2 ${
+                      regJenjang === 'SLTA'
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span>SLTA (SMA / SMK / MA)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Nama Lengkap Sekolah */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                  Nama Lengkap Sekolah <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative">
+                  <Building2 className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    required
+                    value={regSekolah}
+                    onChange={e => setRegSekolah(e.target.value)}
+                    placeholder="Contoh: SMP Negeri 2 Majalengka"
+                    className="w-full pl-9 pr-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Nama Pembina & Kontak WhatsApp */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nama Pembina / Pendamping</label>
+                  <input
+                    type="text"
+                    value={regPembina}
+                    onChange={e => setRegPembina(e.target.value)}
+                    placeholder="Contoh: Hariyadi, S.Pd"
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">No. WhatsApp / HP</label>
+                  <div className="relative">
+                    <Phone className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      value={regWa}
+                      onChange={e => setRegWa(e.target.value)}
+                      placeholder="08xxxxxxxxxx"
+                      className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-emerald-500 outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Username */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                  Username Akun Sekolah <span className="text-rose-500">*</span>
+                </label>
+                <div className="relative">
+                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    required
+                    value={regUsername}
+                    onChange={e => setRegUsername(e.target.value)}
+                    placeholder="Gunakan huruf kecil tanpa spasi, contoh: smpn2majalengka"
+                    className="w-full pl-9 pr-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Password & Konfirmasi */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                    Password <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={regPassword}
+                    onChange={e => setRegPassword(e.target.value)}
+                    placeholder="Minimal 4 karakter"
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                    Konfirmasi Password <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={regConfirmPassword}
+                    onChange={e => setRegConfirmPassword(e.target.value)}
+                    placeholder="Ulangi password"
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-lg text-xs sm:text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer mt-2"
+              >
+                <Building2 className="w-4 h-4" /> Daftarkan Akun Sekolah Sekarang
+              </button>
+
+              <div className="text-center pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAuthViewTab('login')}
+                  className="text-xs font-bold text-slate-500 hover:text-slate-800 cursor-pointer"
+                >
+                  Sudah memiliki akun? Kembali ke menu Masuk →
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       </div>
     );
   }
+
 
   // ==========================================
   // RENDER: MAIN APPLICATION
@@ -2146,551 +3011,1341 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col bg-slate-100 text-slate-800">
       {/* 1. TOP NAVBAR */}
-      <header className="bg-slate-900 text-white shadow-lg sticky top-0 z-40 no-print">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
-            {/* Brand Title */}
+      <header className="bg-slate-900 text-white shadow sticky top-0 z-40 no-print border-b border-slate-800">
+        <div className="px-3 sm:px-6 py-2.5">
+          <div className="flex justify-between items-center gap-3">
+            {/* Left: Mobile Toggle & Brand */}
             <div className="flex items-center space-x-3">
-              <div className="bg-blue-600 p-2 rounded-lg text-white shadow">
-                <Shield className="w-5 h-5" />
-              </div>
-              <div>
-                <h1 className="font-black text-base sm:text-lg tracking-tight leading-none text-white">
-                  E-REKAP LOMBA PBB & PKS
-                </h1>
-                <p className="text-[11px] text-blue-300 font-medium tracking-wider mt-0.5">
-                  SLTP & SLTA • REKAP JUARA UMUM & PER-KATEGORI
-                </p>
+              <button
+                onClick={() => setSidebarOpen(prev => !prev)}
+                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white transition cursor-pointer lg:hidden"
+                title="Buka Menu Sidebar"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+
+              <button
+                onClick={() => setSidebarCollapsed(prev => !prev)}
+                className="hidden lg:flex p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white transition cursor-pointer"
+                title={sidebarCollapsed ? "Perluas Sidebar" : "Perkecil Sidebar"}
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+
+              <div
+                className="flex items-center space-x-2.5 cursor-pointer"
+                onClick={() => setCurrentTab('dashboard')}
+              >
+                {appLogo ? (
+                  <img
+                    src={appLogo}
+                    alt="Logo Aplikasi"
+                    className="w-9 h-9 object-contain rounded-lg p-0.5 bg-white shrink-0 shadow"
+                  />
+                ) : (
+                  <div className="bg-blue-600 p-2 rounded-lg text-white shadow shrink-0">
+                    <Shield className="w-5 h-5" />
+                  </div>
+                )}
+                <div>
+                  <h1 className="font-black text-sm sm:text-base tracking-tight leading-none text-white whitespace-nowrap">
+                    E-REKAP LOMBA PBB & PKS
+                  </h1>
+                  <p className="text-[10px] sm:text-[11px] text-blue-300 font-medium tracking-wider mt-0.5 whitespace-nowrap">
+                    SLTP & SLTA • REKAP JUARA & PENILAIAN JURI
+                  </p>
+                </div>
               </div>
             </div>
 
-            {/* Profile & Action Buttons */}
-            <div className="flex items-center space-x-2 sm:space-x-3">
+            {/* Center: Quick Active Participant Bar */}
+            {activePeserta && (
+              <div className="hidden md:flex items-center gap-2 bg-slate-800/90 border border-slate-700/80 px-3 py-1.5 rounded-xl text-xs max-w-md truncate">
+                <span className="text-slate-400 font-semibold text-[11px] shrink-0">Peserta:</span>
+                <span className={`px-1.5 py-0.2 rounded font-black text-[10px] shrink-0 ${
+                  activePeserta.jenjang === 'SLTA' ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white'
+                }`}>
+                  {activePeserta.jenjang || 'SLTP'}
+                </span>
+                <span className="font-bold text-white truncate">
+                  No. {activePeserta.nomor} - {activePeserta.peleton ? `${activePeserta.peleton} (${activePeserta.sekolah})` : activePeserta.sekolah}
+                </span>
+                <div className="flex items-center gap-0.5 shrink-0 ml-1">
+                  <button
+                    onClick={handlePrevPeserta}
+                    title="Peserta Sebelumnya"
+                    className="p-1 hover:bg-slate-700 rounded text-slate-300 hover:text-white transition cursor-pointer"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={handleNextPeserta}
+                    title="Peserta Berikutnya"
+                    className="p-1 hover:bg-slate-700 rounded text-slate-300 hover:text-white transition cursor-pointer"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Right: User Profile & Actions */}
+            <div className="flex items-center space-x-2">
               <div className="hidden sm:flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-full text-xs">
-                <User className="w-4 h-4 text-blue-400" />
-                <div>
-                  <span className="font-bold text-white block leading-tight">{currentUser.name}</span>
-                  <span className="text-[10px] uppercase font-bold text-blue-300 tracking-wider">
+                <User className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                <div className="text-left">
+                  <span className="font-bold text-white block leading-tight text-xs truncate max-w-[140px]">{currentUser.name}</span>
+                  <span className="text-[9px] uppercase font-bold text-blue-300 tracking-wider">
                     {currentUser.role === 'admin'
                       ? 'ADMINISTRATOR'
                       : currentUser.role === 'juri'
                       ? 'JURI LAPANGAN'
-                      : 'TAMU / READ-ONLY'}
+                      : currentUser.role === 'sekolah'
+                      ? (currentUser.schoolName ? `SEKOLAH: ${currentUser.schoolName}` : 'AKUN SEKOLAH')
+                      : 'TAMU (READ-ONLY)'}
                   </span>
                 </div>
               </div>
 
-              {/* Tambah Peserta */}
               {!isUserRole && (
                 <button
                   onClick={openNewPesertaModal}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold flex items-center gap-1.5 shadow transition cursor-pointer"
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow transition cursor-pointer shrink-0"
                 >
-                  <UserPlus className="w-4 h-4" />
+                  <UserPlus className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline">Tambah Peserta</span>
                 </button>
-              )}
-
-              {/* Tombol Manajemen Pengguna (Khusus Admin) */}
-              {isAdminRole && (
-                <button
-                  onClick={() => {
-                    setUserFormTab('list');
-                    setModalUserOpen(true);
-                  }}
-                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium flex items-center gap-1.5 border border-slate-700 transition cursor-pointer"
-                >
-                  <Users className="w-4 h-4 text-blue-400" />
-                  <span className="hidden md:inline">Kelola User</span>
-                </button>
-              )}
-
-              {/* Pengaturan Juknis & Database (Khusus Admin) */}
-              {isAdminRole && (
-                <div className="relative group">
-                  <button className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium flex items-center gap-1.5 border border-slate-700 transition cursor-pointer">
-                    <Sliders className="w-4 h-4" />
-                    <span className="hidden sm:inline">Menu Data</span>
-                    <ChevronDown className="w-3.5 h-3.5" />
-                  </button>
-                  <div className="absolute right-0 mt-1 w-56 bg-white rounded-xl shadow-xl py-1.5 hidden group-hover:block z-50 text-slate-700 border border-slate-200">
-                    <button
-                      onClick={() => {
-                        setTempCategoriesConfig([...categories]);
-                        setModalConfigOpen(true);
-                      }}
-                      className="w-full text-left px-4 py-2 text-xs hover:bg-slate-100 flex items-center gap-2 font-medium"
-                    >
-                      <Settings className="w-4 h-4 text-blue-600" /> Atur Nilai Maksimal Juknis
-                    </button>
-                    <button
-                      onClick={handleExportExcelMasterWorkbook}
-                      className="w-full text-left px-4 py-2 text-xs hover:bg-slate-100 flex items-center gap-2 font-medium"
-                    >
-                      <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> Ekspor Buku Rekap Multi-Sheet
-                    </button>
-                    <button
-                      onClick={handleDownloadMasterBlankWorkbook}
-                      className="w-full text-left px-4 py-2 text-xs hover:bg-slate-100 flex items-center gap-2 font-medium"
-                    >
-                      <Download className="w-4 h-4 text-teal-600" /> Unduh Master Blanko 11 Kategori (.xlsx)
-                    </button>
-                    <button
-                      onClick={() => {
-                        setBlankSheetCatKey('pbb');
-                        setModalBlankSheetOpen(true);
-                      }}
-                      className="w-full text-left px-4 py-2 text-xs hover:bg-slate-100 flex items-center gap-2 font-medium"
-                    >
-                      <Printer className="w-4 h-4 text-slate-600" /> Cetak / Pratinjau Blanko Form Juri
-                    </button>
-                    <button
-                      onClick={handleExportJson}
-                      className="w-full text-left px-4 py-2 text-xs hover:bg-slate-100 flex items-center gap-2 font-medium"
-                    >
-                      <Download className="w-4 h-4 text-blue-600" /> Cadangkan JSON Lengkap
-                    </button>
-                    <label className="w-full text-left px-4 py-2 text-xs hover:bg-slate-100 flex items-center gap-2 cursor-pointer font-medium">
-                      <Upload className="w-4 h-4 text-amber-600" /> Pulihkan JSON
-                      <input
-                        type="file"
-                        ref={fileInputRef}
-                        className="hidden"
-                        accept=".json"
-                        onChange={handleImportJson}
-                      />
-                    </label>
-                    <hr className="my-1 border-slate-200" />
-                    <button
-                      onClick={handleResetAllData}
-                      className="w-full text-left px-4 py-2 text-xs hover:bg-rose-50 text-rose-600 flex items-center gap-2 font-medium"
-                    >
-                      <RotateCcw className="w-4 h-4" /> Reset Semua Data
-                    </button>
-                  </div>
-                </div>
               )}
 
               <button
                 onClick={handleLogout}
                 title="Keluar Akun"
-                className="bg-rose-600/80 hover:bg-rose-600 text-white px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold flex items-center gap-1.5 transition cursor-pointer"
+                className="bg-rose-600/80 hover:bg-rose-600 text-white px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shrink-0"
               >
-                <LogOut className="w-4 h-4" />
+                <LogOut className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">Logout</span>
               </button>
-            </div>
-          </div>
-
-          {/* Navigation Bar with Dropdown for Assessment Categories */}
-          <div className="flex flex-wrap items-center justify-between gap-2 py-2 border-t border-slate-800 text-xs">
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => setCurrentTab('dashboard')}
-                className={`px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 font-bold cursor-pointer ${
-                  currentTab === 'dashboard'
-                    ? 'bg-blue-600 text-white shadow'
-                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                }`}
-              >
-                <LayoutDashboard className="w-3.5 h-3.5" /> {isUserRole ? 'Data Mentah Peserta' : 'Dashboard'}
-              </button>
-
-              {!isUserRole ? (
-                <button
-                  onClick={() => setCurrentTab('rekap')}
-                  className={`px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 font-bold cursor-pointer ${
-                    currentTab === 'rekap'
-                      ? 'bg-amber-500 text-slate-950 shadow'
-                      : 'bg-slate-800 text-amber-400 hover:text-white'
-                  }`}
-                >
-                  <Trophy className="w-3.5 h-3.5" /> Rekapitulasi & Peringkat
-                </button>
-              ) : (
-                <div className="bg-slate-800 border border-slate-700 text-amber-300 px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 font-bold text-[11px]">
-                  <Eye className="w-3.5 h-3.5 text-amber-400" /> Mode Tamu (Hanya Data Mentah)
-                </div>
-              )}
-            </div>
-
-            {/* DROPDOWN PEMILIH KATEGORI PENILAIAN */}
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-slate-400 font-semibold hidden md:inline">
-                {isUserRole ? 'Lihat Lembar Nilai Mentah:' : 'Kategori Penilaian:'}
-              </span>
-              <div className="relative flex items-center">
-                <select
-                  value={activeCategory ? activeCategory.key : ''}
-                  onChange={e => {
-                    if (e.target.value) setCurrentTab(e.target.value);
-                  }}
-                  className="bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-1.5 pl-3 pr-8 rounded-lg border border-slate-700 focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer"
-                >
-                  <option value="" disabled>-- Pilih Kategori Penilaian --</option>
-                  <optgroup label="PBB & Variasi">
-                    {categories.filter(c => c.group === 'PBB & Variasi').map(cat => {
-                      const isDone = activeCalc?.categorySummaries[cat.key]?.isComplete;
-                      return (
-                        <option key={cat.key} value={cat.key}>
-                          {isDone ? '✓ ' : '• '} {cat.title} (Max {cat.maxPoints})
-                        </option>
-                      );
-                    })}
-                  </optgroup>
-                  <optgroup label="Lantas & Lapangan">
-                    {categories.filter(c => c.group === 'Lantas & Lapangan').map(cat => {
-                      const isDone = activeCalc?.categorySummaries[cat.key]?.isComplete;
-                      return (
-                        <option key={cat.key} value={cat.key}>
-                          {isDone ? '✓ ' : '• '} {cat.title} (Max {cat.maxPoints})
-                        </option>
-                      );
-                    })}
-                  </optgroup>
-                  <optgroup label="Kreasi & Khusus">
-                    {categories.filter(c => c.group === 'Kreasi & Khusus').map(cat => {
-                      const isDone = activeCalc?.categorySummaries[cat.key]?.isComplete;
-                      return (
-                        <option key={cat.key} value={cat.key}>
-                          {isDone ? '✓ ' : '• '} {cat.title} (Max {cat.maxPoints})
-                        </option>
-                      );
-                    })}
-                  </optgroup>
-                </select>
-                <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2 pointer-events-none" />
-              </div>
             </div>
           </div>
         </div>
       </header>
 
-      {/* 2. PARTICIPANT ACTIVE SELECTOR BAR */}
-      <div className="bg-slate-800 text-white border-b border-slate-700 py-2.5 px-4 sm:px-8 shadow-sm no-print">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <span className="text-xs uppercase tracking-wider text-slate-400 font-bold">
-              Pilih Peserta:
-            </span>
-            <select
-              value={activePesertaId || ''}
-              onChange={e => setActivePesertaId(e.target.value)}
-              className="bg-slate-900 border border-slate-700 text-white text-sm rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-blue-500 font-semibold max-w-sm outline-none"
+      {/* 2. MAIN LAYOUT: SIDEBAR + CONTENT VIEWPORT */}
+      <div className="flex-1 flex min-h-[calc(100vh-4rem)] relative">
+        {/* Mobile Backdrop Overlay */}
+        {sidebarOpen && (
+          <div
+            onClick={() => setSidebarOpen(false)}
+            className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-40 lg:hidden no-print"
+          />
+        )}
+
+        {/* SIDEBAR NAVIGATION */}
+        <aside
+          className={`no-print bg-slate-900 border-r border-slate-800 text-slate-200 transition-all duration-200 z-40 flex flex-col shrink-0 ${
+            sidebarOpen
+              ? 'fixed inset-y-0 left-0 w-72 sm:w-80 shadow-2xl flex h-full pt-0 z-50'
+              : 'hidden lg:flex'
+          } ${sidebarCollapsed ? 'lg:w-20' : 'lg:w-72 xl:w-80'}`}
+        >
+          {/* Mobile Sidebar Close Button Header */}
+          <div className="flex lg:hidden items-center justify-between p-3 border-b border-slate-800 bg-slate-950">
+            <div className="flex items-center gap-2">
+              <Shield className="w-4 h-4 text-blue-400" />
+              <span className="text-xs font-black uppercase text-white">Menu Navigasi Lomba</span>
+            </div>
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
             >
-              {pesertaList.map(p => (
-                <option key={p.id} value={p.id}>
-                  [{p.jenjang || 'SLTP'}] No. {p.nomor} - {p.peleton ? `${p.peleton} (${p.sekolah})` : p.sekolah}
-                </option>
-              ))}
-            </select>
-            {!isUserRole && activePeserta && (
-              <button
-                onClick={() => openEditPesertaModal(activePeserta)}
-                title="Edit Identitas Peserta"
-                className="text-blue-300 hover:text-white text-xs bg-slate-700 hover:bg-slate-600 px-2.5 py-1.5 rounded-lg transition flex items-center gap-1 cursor-pointer"
-              >
-                <Edit className="w-3.5 h-3.5" /> Edit
-              </button>
-            )}
+              <X className="w-5 h-5" />
+            </button>
           </div>
 
-          {activePeserta && (
-            <div className="flex flex-wrap items-center gap-4 text-xs text-slate-300">
-              <span className={`px-2 py-0.5 rounded font-black text-[11px] ${
-                activePeserta.jenjang === 'SLTA'
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-blue-600 text-white'
-              }`}>
-                {activePeserta.jenjang || 'SLTP'}
-              </span>
-              <span className="flex items-center gap-1.5">
-                <Building2 className="w-3.5 h-3.5 text-blue-400" /> {activePeserta.sekolah}
-              </span>
-              <span className="flex items-center gap-1.5">
-                <Calendar className="w-3.5 h-3.5 text-blue-400" /> {activePeserta.tanggal}
-              </span>
-              <span className="flex items-center gap-1.5">
-                <UserCheck className="w-3.5 h-3.5 text-blue-400" /> Juri: {activePeserta.juri}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
+          {/* Sidebar Scrollable Body */}
+          <div className="flex-1 overflow-y-auto p-3 space-y-3.5 custom-scrollbar">
+            {/* Top Shortcut: Dashboard Ringkasan */}
+            <button
+              onClick={() => {
+                setCurrentTab('dashboard');
+                setSidebarOpen(false);
+              }}
+              className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                currentTab === 'dashboard'
+                  ? 'bg-blue-600 text-white shadow'
+                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+              }`}
+            >
+              <LayoutDashboard className="w-4 h-4 text-blue-400 shrink-0" />
+              {!sidebarCollapsed && (
+                <span className="truncate">{isUserRole ? 'Data Mentah Peserta' : 'Dashboard Ringkasan'}</span>
+              )}
+            </button>
 
-      {/* Read-Only Notice for User Role */}
-      {isUserRole && (
-        <div className="bg-amber-500 text-slate-950 font-bold px-4 py-2 text-xs text-center border-b border-amber-600 no-print flex items-center justify-center gap-2">
-          <Lock className="w-3.5 h-3.5 shrink-0" /> Anda masuk sebagai Akun Tamu / User (Mode Hanya Lihat). Perubahan data dan penginputan nilai dinonaktifkan.
-        </div>
-      )}
-
-      {/* 3. MAIN CONTENT CONTAINER */}
-      <main className={`max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full ${(modalPrintOpen || modalBlankSheetOpen) ? 'no-print' : ''}`}>
-        {/* ==================================================== */}
-        {/* TAB 1: DASHBOARD RINGKASAN */}
-        {/* ==================================================== */}
-        {currentTab === 'dashboard' && (
-          <div className="space-y-6">
-            {pesertaList.length === 0 ? (
-              <div className="bg-amber-50 border border-amber-300 p-6 rounded-2xl text-center">
-                <AlertTriangle className="w-10 h-10 text-amber-500 mx-auto mb-2" />
-                <h3 className="font-bold text-lg text-amber-900">Belum Ada Data Peserta</h3>
-                <p className="text-sm text-amber-700 max-w-md mx-auto mt-1">
-                  Silakan tambahkan peserta lomba terlebih dahulu menggunakan tombol Tambah Peserta di kanan atas.
-                </p>
-                {!isUserRole && (
-                  <button
-                    onClick={openNewPesertaModal}
-                    className="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold inline-flex items-center gap-2 cursor-pointer shadow"
-                  >
-                    <UserPlus className="w-4 h-4" /> Tambah Peserta Pertama
-                  </button>
-                )}
-              </div>
-            ) : (
-              <>
-                {/* Active Participant Header Card */}
-                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <span className="inline-block px-3 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-blue-100 text-blue-800">
-                        No. Peserta: {activePeserta?.nomor || '-'}
-                      </span>
-                      <span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-black uppercase tracking-wider text-white ${
-                        activePeserta?.jenjang === 'SLTA' ? 'bg-indigo-600' : 'bg-blue-600'
-                      }`}>
-                        Jenjang {activePeserta?.jenjang || 'SLTP'}
-                      </span>
+            {/* ---------------------------------------------------- */}
+            {/* DROPDOWN 1: PILIHAN KATEGORI PENILAIAN */}
+            {/* ---------------------------------------------------- */}
+            <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
+              <button
+                onClick={() => setSidebarCatDropdownOpen(prev => !prev)}
+                className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="p-1.5 rounded-lg bg-blue-500/15 text-blue-400 shrink-0">
+                    <Sliders className="w-4 h-4" />
+                  </div>
+                  {!sidebarCollapsed && (
+                    <div className="text-left truncate">
+                      <span className="block font-bold text-white text-xs">Kategori Penilaian</span>
+                      <span className="text-[10px] text-slate-400 font-normal">11 Mata Lomba</span>
                     </div>
+                  )}
+                </div>
+                {!sidebarCollapsed && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] font-bold bg-slate-800 text-blue-300 px-1.5 py-0.5 rounded">
+                      {activeCalc?.completedCategoriesCount || 0}/11
+                    </span>
+                    {sidebarCatDropdownOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                    )}
+                  </div>
+                )}
+              </button>
 
-                    <h2 className="text-2xl font-black text-slate-900">
-                      {activePeserta?.peleton ? activePeserta.peleton : activePeserta?.sekolah}
-                    </h2>
-                    {activePeserta?.peleton && (
-                      <p className="text-sm text-slate-500 mt-0.5">
-                        Asal Sekolah / Kontingen: <strong className="text-slate-700">{activePeserta.sekolah}</strong>
-                      </p>
+              {(!sidebarCollapsed && sidebarCatDropdownOpen) && (
+                <div className="p-2 pt-0 space-y-3 border-t border-slate-800/60">
+                  {(['PBB & Variasi', 'Lantas & Lapangan', 'Kreasi & Khusus'] as const).map(groupName => (
+                    <div key={groupName} className="space-y-1">
+                      <div className="text-[10px] uppercase font-black tracking-wider text-slate-500 px-2 pt-2">
+                        {groupName}
+                      </div>
+                      {categories.filter(c => c.group === groupName).map(cat => {
+                        const isDone = activeCalc?.categorySummaries[cat.key]?.isComplete;
+                        const score = activeCalc?.categorySummaries[cat.key]?.sum || 0;
+                        const isCurrent = currentTab === cat.key;
+                        return (
+                          <button
+                            key={cat.key}
+                            onClick={() => {
+                              setCurrentTab(cat.key);
+                              setSidebarOpen(false);
+                            }}
+                            className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer ${
+                              isCurrent
+                                ? 'bg-blue-600 text-white font-bold shadow-xs'
+                                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              {isDone ? (
+                                <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${isCurrent ? 'text-white' : 'text-emerald-400'}`} />
+                              ) : (
+                                <span className={`w-2 h-2 rounded-full shrink-0 ${isCurrent ? 'bg-white' : 'bg-slate-600'}`} />
+                              )}
+                              <span className="truncate">{cat.shortTitle || cat.title}</span>
+                            </div>
+                            <span className={`text-[10px] tabular-nums shrink-0 ml-1 ${isCurrent ? 'text-blue-100 font-bold' : 'text-slate-400'}`}>
+                              {score}/{cat.maxPoints}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* ---------------------------------------------------- */}
+            {/* DROPDOWN 2: NAMA-NAMA PESERTA & SEKOLAH */}
+            {/* ---------------------------------------------------- */}
+            <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
+              <button
+                onClick={() => setSidebarPesertaDropdownOpen(prev => !prev)}
+                className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="p-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 shrink-0">
+                    <Users className="w-4 h-4" />
+                  </div>
+                  {!sidebarCollapsed && (
+                    <div className="text-left truncate">
+                      <span className="block font-bold text-white text-xs">Nama-Nama Peserta</span>
+                      <span className="text-[10px] text-slate-400 font-normal">Daftar Kontingen</span>
+                    </div>
+                  )}
+                </div>
+                {!sidebarCollapsed && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] font-bold bg-slate-800 text-emerald-300 px-1.5 py-0.5 rounded">
+                      {pesertaList.length}
+                    </span>
+                    {sidebarPesertaDropdownOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                    )}
+                  </div>
+                )}
+              </button>
+
+              {(!sidebarCollapsed && sidebarPesertaDropdownOpen) && (
+                <div className="p-2.5 pt-0 space-y-2 border-t border-slate-800/60">
+                  {/* Search Input */}
+                  <div className="relative mt-2">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                    <input
+                      type="text"
+                      value={sidebarPesertaSearch}
+                      onChange={e => setSidebarPesertaSearch(e.target.value)}
+                      placeholder="Cari nomor / sekolah..."
+                      className="w-full bg-slate-900 border border-slate-700/80 rounded-lg pl-8 pr-7 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                    {sidebarPesertaSearch && (
+                      <button
+                        onClick={() => setSidebarPesertaSearch('')}
+                        className="absolute right-2 top-2 text-slate-400 hover:text-white"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-6 border-t md:border-t-0 md:border-l border-slate-200 pt-3 md:pt-0 md:pl-6 text-xs text-slate-600">
-                    <div>
-                      <span className="text-slate-400 block font-medium">Hari / Tanggal:</span>
-                      <strong className="text-slate-800 text-sm">{activePeserta?.tanggal || '-'}</strong>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block font-medium">Nama Juri Bertugas:</span>
-                      <strong className="text-slate-800 text-sm">{activePeserta?.juri || '-'}</strong>
-                    </div>
+                  {/* Jenjang Segmented Filter */}
+                  <div className="flex items-center gap-1 p-0.5 bg-slate-900 rounded-lg text-[10px]">
+                    {(['all', 'SLTP', 'SLTA'] as const).map(lvl => (
+                      <button
+                        key={lvl}
+                        onClick={() => setSidebarPesertaJenjang(lvl)}
+                        className={`flex-1 py-1 rounded font-bold transition cursor-pointer ${
+                          sidebarPesertaJenjang === lvl
+                            ? 'bg-blue-600 text-white shadow-xs'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {lvl === 'all' ? 'Semua' : lvl}
+                      </button>
+                    ))}
                   </div>
-                </div>
 
-                {/* Grand Total Summary Card */}
-                <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-blue-950 text-white rounded-2xl p-6 sm:p-8 shadow-xl">
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6 items-center">
-                    <div className="md:col-span-2 space-y-2">
-                      <span className="bg-blue-500/20 text-blue-300 border border-blue-400/30 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider inline-block">
-                        Akumulasi Nilai Keseluruhan
-                      </span>
-                      <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
-                        TOTAL REKAPITULASI POIN
-                      </h2>
-                      <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-                        Akumulasi otomatis seluruh {categories.length} kategori lomba. Peserta otomatis masuk peringkat juara jika seluruh kategori wajib telah dinilai 100%.
-                      </p>
-                    </div>
-
-                    <div className="text-center md:text-right border-y md:border-y-0 md:border-x border-slate-700 py-4 md:py-0 md:px-6">
-                      <span className="text-xs text-slate-400 uppercase font-semibold">Total Nilai Diperoleh:</span>
-                      <div className="flex items-baseline justify-center md:justify-end gap-1.5 mt-1">
-                        <span className="text-5xl font-black text-amber-400 tracking-tight tabular-nums">
-                          {activeCalc?.grandTotal || 0}
-                        </span>
-                        <span className="text-slate-400 font-bold text-lg">/ {activeCalc?.maxGrandTotal || 0}</span>
+                  {/* List Peserta */}
+                  <div className="max-h-56 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
+                    {filteredSidebarPeserta.length === 0 ? (
+                      <div className="text-center py-4 text-xs text-slate-500">
+                        Tidak ada peserta sesuai filter
                       </div>
-                      <p className="text-xs text-blue-300 font-bold mt-1">
-                        Persentase: <span className="text-white text-sm font-black">{(activeCalc?.grandPct || 0).toFixed(2)}%</span>
-                      </p>
-                    </div>
-
-                    <div className="text-center space-y-3">
-                      <div>
-                        <span className="text-xs text-slate-400 uppercase font-semibold block">
-                          Kelengkapan Kategori:
-                        </span>
-                        <span className="text-2xl font-black text-white">
-                          {activeCalc?.completedCategoriesCount || 0} / {categories.length} Selesai
-                        </span>
-                      </div>
-                      <div>
-                        {activeCalc?.mandatoryCompleted ? (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-500 text-white shadow">
-                            <CheckCircle2 className="w-3.5 h-3.5" /> Memenuhi Syarat Juara
-                          </span>
-                        ) : (
-                          <span className="inline-block px-3 py-1 rounded-full text-xs font-bold bg-amber-500 text-white shadow">
-                            Belum Lengkap ({activeCalc?.completedCategoriesCount}/{categories.length})
-                          </span>
-                        )}
-                      </div>
-                    </div>
+                    ) : (
+                      filteredSidebarPeserta.map(p => {
+                        const isCurrentActive = p.id === activePesertaId;
+                        const summary = pesertaSummariesMap[p.id];
+                        return (
+                          <button
+                            key={p.id}
+                            onClick={() => {
+                              setActivePesertaId(p.id);
+                              setSidebarOpen(false);
+                            }}
+                            className={`w-full text-left p-2 rounded-lg text-xs transition cursor-pointer flex items-center justify-between gap-2 border ${
+                              isCurrentActive
+                                ? 'bg-blue-600/20 border-blue-500 text-white font-semibold'
+                                : 'border-slate-800/80 hover:bg-slate-800 text-slate-300'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 mb-0.5">
+                                <span className={`text-[9px] font-black px-1.5 py-0.2 rounded uppercase ${
+                                  p.jenjang === 'SLTA' ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white'
+                                }`}>
+                                  {p.jenjang || 'SLTP'}
+                                </span>
+                                <span className="font-bold text-slate-100">No. {p.nomor}</span>
+                              </div>
+                              <div className="truncate text-[11px] text-slate-300">
+                                {p.peleton ? `${p.peleton} - ${p.sekolah}` : p.sekolah}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <span className="text-[10px] font-bold block tabular-nums text-amber-300">
+                                {summary?.totalPoints || 0} pts
+                              </span>
+                              <span className="text-[9px] text-slate-400">
+                                {summary?.completedCats || 0}/11
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
-                </div>
 
-                {/* Banner & Tombol Unduh Format Blanko Lembar Penilaian Juri */}
-                <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-blue-50 border border-emerald-200 rounded-2xl p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-xs">
-                  <div className="flex items-start sm:items-center gap-3.5">
-                    <div className="p-3 bg-emerald-600 text-white rounded-xl shadow-xs shrink-0">
-                      <FileSpreadsheet className="w-6 h-6" />
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-sm sm:text-base text-emerald-950 flex items-center gap-2">
-                        <span>Format Blanko Penilaian Siap Download & Cetak</span>
-                        <span className="text-[10px] bg-emerald-200 text-emerald-900 font-extrabold px-2 py-0.5 rounded-full uppercase">
-                          11 Kategori
-                        </span>
-                      </h4>
-                      <p className="text-xs text-emerald-800 mt-0.5 max-w-2xl">
-                        Unduh form penilaian kosong berbobot KS, K, C, B, dan A dalam format Excel (.xlsx) atau cetak lembar fisik untuk juri di lapangan.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 w-full md:w-auto shrink-0">
+                  {/* Actions inside Peserta dropdown */}
+                  <div className="pt-2 border-t border-slate-800 space-y-1.5">
+                    {!isUserRole && (
+                      <button
+                        onClick={openNewPesertaModal}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                      >
+                        <UserPlus className="w-3.5 h-3.5" /> + Tambah Peserta Baru
+                      </button>
+                    )}
                     <button
-                      onClick={handleDownloadMasterBlankWorkbook}
-                      className="flex-1 md:flex-initial text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3.5 py-2.5 rounded-xl shadow-sm transition flex items-center justify-center gap-1.5 cursor-pointer"
-                      title="Download seluruh 11 lembar form kriteria dalam satu buku kerja Excel"
+                      onClick={() => handleExportDaftarPesertaExcel('all')}
+                      className="w-full bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-700/60 text-emerald-200 py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
-                      <Download className="w-4 h-4" /> Download Master Semua Kriteria (.xlsx)
+                      <Download className="w-3.5 h-3.5 text-emerald-400" /> Unduh Daftar Excel (.xlsx)
                     </button>
                     <button
-                      onClick={() => {
-                        setBlankSheetCatKey('pbb');
-                        setModalBlankSheetOpen(true);
-                      }}
-                      className="flex-1 md:flex-initial text-xs bg-white hover:bg-emerald-50 text-emerald-800 font-bold px-3.5 py-2.5 rounded-xl border border-emerald-300 shadow-2xs transition flex items-center justify-center gap-1.5 cursor-pointer"
-                      title="Pratinjau lembar blanko untuk dicetak ke kertas"
+                      onClick={() => setModalDaftarPesertaOpen(true)}
+                      className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 py-1.5 px-2.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
-                      <Printer className="w-4 h-4 text-emerald-700" /> Pratinjau & Cetak Blanko
+                      <Users className="w-3.5 h-3.5 text-blue-400" /> Kelola Tabel Peserta
                     </button>
                   </div>
                 </div>
+              )}
+            </div>
 
-                {/* Grid of All Category Cards */}
-                <div>
-                  <div className="flex justify-between items-center mb-4">
-                    <h3 className="font-black text-base uppercase text-slate-800 tracking-wider">
-                      Daftar Capaian Tiap Kategori
-                    </h3>
-                    <div className="flex items-center gap-2">
-                      {!isUserRole ? (
-                        <button
-                          onClick={() => {
-                            setRekapViewMode('kategori');
-                            setCurrentTab('rekap');
-                          }}
-                          className="text-xs text-blue-600 hover:text-blue-800 font-bold flex items-center gap-1 cursor-pointer bg-white border border-blue-200 px-3 py-1.5 rounded-lg shadow-xs"
-                        >
-                          <Trophy className="w-3.5 h-3.5 text-amber-500" /> Lihat Peringkat Tiap Kategori
-                        </button>
-                      ) : (
-                        <div className="text-xs text-slate-600 font-bold bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 flex items-center gap-1.5">
-                          <Eye className="w-3.5 h-3.5 text-blue-600" /> Data Mentah Lapangan (Belum Rekap)
+            {/* ---------------------------------------------------- */}
+            {/* DROPDOWN 3: REKAPITULASI & PERINGKAT */}
+            {/* ---------------------------------------------------- */}
+            <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
+              <button
+                onClick={() => setSidebarRekapDropdownOpen(prev => !prev)}
+                className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="p-1.5 rounded-lg bg-amber-500/15 text-amber-400 shrink-0">
+                    <Trophy className="w-4 h-4" />
+                  </div>
+                  {!sidebarCollapsed && (
+                    <div className="text-left truncate">
+                      <span className="block font-bold text-white text-xs">Rekapitulasi</span>
+                      <span className="text-[10px] text-slate-400 font-normal">Juara & Peringkat</span>
+                    </div>
+                  )}
+                </div>
+                {!sidebarCollapsed && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">
+                      Podium
+                    </span>
+                    {sidebarRekapDropdownOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                    )}
+                  </div>
+                )}
+              </button>
+
+              {(!sidebarCollapsed && sidebarRekapDropdownOpen) && (
+                <div className="p-2 pt-0 space-y-1 border-t border-slate-800/60 mt-1">
+                  {isUserRole ? (
+                    <div className="p-2.5 bg-slate-900 rounded-lg text-[11px] text-amber-300 leading-relaxed border border-slate-800">
+                      <Eye className="w-3.5 h-3.5 inline mr-1 text-amber-400" />
+                      Mode Tamu: Rekapitulasi juara hanya dapat diakses oleh Panitia & Juri.
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => {
+                          setCurrentTab('rekap');
+                          setRekapViewMode('umum');
+                          setSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
+                          currentTab === 'rekap' && rekapViewMode === 'umum'
+                            ? 'bg-amber-500 text-slate-950 font-black shadow'
+                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                        }`}
+                      >
+                        <Trophy className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        <span className="truncate">Klasemen Juara Umum</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setCurrentTab('rekap');
+                          setRekapViewMode('kategori');
+                          setSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
+                          currentTab === 'rekap' && rekapViewMode === 'kategori'
+                            ? 'bg-amber-500 text-slate-950 font-black shadow'
+                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Medal className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                          <span className="truncate">Peringkat Per Kategori</span>
                         </div>
+                      </button>
+
+                      {currentTab === 'rekap' && rekapViewMode === 'kategori' && (
+                        <div className="pl-4 pr-1 py-1 space-y-0.5 border-l-2 border-amber-500/40 ml-3">
+                          {categories.map(c => (
+                            <button
+                              key={c.key}
+                              onClick={() => setRekapSelectedCategoryKey(c.key)}
+                              className={`w-full text-left px-2 py-1 rounded text-[11px] truncate transition cursor-pointer ${
+                                rekapSelectedCategoryKey === c.key
+                                  ? 'bg-amber-500/25 text-amber-300 font-bold'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              • {c.shortTitle || c.title}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      <button
+                        onClick={() => {
+                          setCurrentTab('rekap');
+                          setRekapViewMode('ringkasan');
+                          setSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
+                          currentTab === 'rekap' && rekapViewMode === 'ringkasan'
+                            ? 'bg-amber-500 text-slate-950 font-black shadow'
+                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                        }`}
+                      >
+                        <Crown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        <span className="truncate">Podium Juara 1-2-3</span>
+                      </button>
+
+                      <button
+                        onClick={handleExportExcelMasterWorkbook}
+                        className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-emerald-300 hover:bg-emerald-950/40 hover:text-emerald-200 border border-emerald-700/40 transition cursor-pointer font-bold mt-1"
+                      >
+                        <Layers className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="truncate">Ekspor Multi-Sheet (.xlsx)</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ---------------------------------------------------- */}
+            {/* DROPDOWN 4: FORMULIR PENDAFTARAN RESMI PKS */}
+            {/* ---------------------------------------------------- */}
+            <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
+              <button
+                onClick={() => setSidebarFormDropdownOpen(prev => !prev)}
+                className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="p-1.5 rounded-lg bg-indigo-500/15 text-indigo-400 shrink-0">
+                    <FileText className="w-4 h-4" />
+                  </div>
+                  {!sidebarCollapsed && (
+                    <div className="text-left truncate">
+                      <span className="block font-bold text-white text-xs">Form Pendaftaran PKS</span>
+                      <span className="text-[10px] text-slate-400 font-normal">Blanko & Pendaftaran</span>
+                    </div>
+                  )}
+                </div>
+                {!sidebarCollapsed && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] font-bold bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded">
+                      4 Form
+                    </span>
+                    {sidebarFormDropdownOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                    )}
+                  </div>
+                )}
+              </button>
+
+              {(!sidebarCollapsed && sidebarFormDropdownOpen) && (
+                <div className="p-2 pt-0 space-y-1 border-t border-slate-800/60 mt-1">
+                  <button
+                    onClick={() => {
+                      setCurrentTab('form_polisi_pelajar');
+                      setSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
+                      currentTab === 'form_polisi_pelajar'
+                        ? 'bg-indigo-600 text-white font-black shadow'
+                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <Shield className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="truncate">1. Polisi Pelajar (Poljar)</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setCurrentTab('form_calon_pks');
+                      setSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
+                      currentTab === 'form_calon_pks'
+                        ? 'bg-indigo-600 text-white font-black shadow'
+                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <UserCheck className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="truncate">2. Calon Anggota PKS</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setCurrentTab('form_perkemahan_balok1');
+                      setSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
+                      currentTab === 'form_perkemahan_balok1'
+                        ? 'bg-indigo-600 text-white font-black shadow'
+                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <Award className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="truncate">3. Perkemahan PKS Balok 1</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setCurrentTab('form_perkemahan_balok2');
+                      setSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
+                      currentTab === 'form_perkemahan_balok2'
+                        ? 'bg-indigo-600 text-white font-black shadow'
+                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <Star className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="truncate">4. Pendaftaran PKS Balok 2</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Menu Alat & Master Blanko Juri */}
+            <div className="pt-2 border-t border-slate-800 space-y-1">
+              <button
+                onClick={() => {
+                  setBlankSheetCatKey('pbb');
+                  setModalBlankSheetOpen(true);
+                }}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                {!sidebarCollapsed && <span className="truncate">Format Blanko Juri Penilaian</span>}
+              </button>
+
+              {isAdminRole && (
+                <>
+                  <button
+                    onClick={() => setModalLogoOpen(true)}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-amber-300 hover:text-amber-200 hover:bg-slate-800 transition cursor-pointer font-semibold"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Ubah Logo Aplikasi</span>}
+                  </button>
+
+                  <button
+                    onClick={() => setModalSchoolAccountsOpen(true)}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-emerald-400 hover:text-emerald-300 hover:bg-slate-800 transition cursor-pointer font-bold"
+                  >
+                    <Building2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Kelola Akun Sekolah</span>}
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setUserFormTab('list');
+                      setModalUserOpen(true);
+                    }}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    <Users className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Kelola User & Password</span>}
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setTempCategoriesConfig([...categories]);
+                      setModalConfigOpen(true);
+                    }}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    <Settings className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Atur Juknis Nilai Maksimal</span>}
+                  </button>
+
+                  <button
+                    onClick={handleExportJson}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Cadangkan Data (JSON)</span>}
+                  </button>
+
+                  <label className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer font-medium">
+                    <Upload className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Pulihkan Data (JSON)</span>}
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      className="hidden"
+                      accept=".json"
+                      onChange={handleImportJson}
+                    />
+                  </label>
+
+                  <button
+                    onClick={handleResetAllData}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-rose-400 hover:text-rose-200 hover:bg-rose-950/40 transition cursor-pointer font-medium"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Reset Semua Data</span>}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Sidebar Footer: Active User & Logout */}
+          <div className="p-3 border-t border-slate-800 bg-slate-950/60 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-7 h-7 rounded-full bg-blue-600/30 border border-blue-500/50 flex items-center justify-center text-blue-300 font-bold text-xs shrink-0">
+                {currentUser.name.charAt(0).toUpperCase()}
+              </div>
+              {!sidebarCollapsed && (
+                <div className="min-w-0 truncate">
+                  <div className="text-xs font-bold text-white truncate">{currentUser.name}</div>
+                  <div className="text-[10px] text-blue-400 uppercase font-semibold">
+                    {currentUser.role}
+                  </div>
+                </div>
+              )}
+            </div>
+            <button
+              onClick={handleLogout}
+              title="Logout"
+              className="p-1.5 text-rose-400 hover:text-rose-200 hover:bg-rose-950/50 rounded-lg transition cursor-pointer shrink-0"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </aside>
+
+        {/* CONTENT VIEWPORT WRAPPER */}
+        <div className="flex-1 min-w-0 flex flex-col">
+          {/* Read-Only Notice for User Role */}
+          {isUserRole && (
+            <div className="bg-amber-500 text-slate-950 font-bold px-4 py-2 text-xs text-center border-b border-amber-600 no-print flex items-center justify-center gap-2">
+              <Lock className="w-3.5 h-3.5 shrink-0" /> Anda masuk sebagai Akun Tamu / User (Mode Hanya Lihat). Perubahan data dan penginputan nilai dinonaktifkan.
+            </div>
+          )}
+
+          {/* Context sub-bar for Active Participant & Quick Details */}
+          {activePeserta && (
+            <div className="bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 py-2.5 shadow-2xs no-print flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400 font-bold uppercase text-[10px]">Peserta Aktif:</span>
+                <span className={`px-2 py-0.5 rounded font-black text-[11px] ${
+                  activePeserta.jenjang === 'SLTA' ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white'
+                }`}>
+                  {activePeserta.jenjang || 'SLTP'}
+                </span>
+                <span className="font-bold text-slate-900 text-sm">
+                  No. {activePeserta.nomor} - {activePeserta.peleton ? `${activePeserta.peleton} (${activePeserta.sekolah})` : activePeserta.sekolah}
+                </span>
+                {!isUserRole && (
+                  <button
+                    onClick={() => openEditPesertaModal(activePeserta)}
+                    className="ml-2 text-blue-600 hover:text-blue-800 font-bold flex items-center gap-1 hover:underline cursor-pointer"
+                  >
+                    <Edit className="w-3.5 h-3.5" /> Edit Data
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-4 text-slate-500">
+                <span className="flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-blue-600" /> {activePeserta.tanggal}
+                </span>
+                <span className="flex items-center gap-1">
+                  <UserCheck className="w-3.5 h-3.5 text-blue-600" /> Juri: {activePeserta.juri}
+                </span>
+                <span className="text-slate-300">|</span>
+                <button
+                  onClick={() => setModalDaftarPesertaOpen(true)}
+                  className="font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
+                >
+                  <Users className="w-3.5 h-3.5" /> Semua Peserta
+                </button>
+                <button
+                  onClick={() => handleExportDaftarPesertaExcel('all')}
+                  className="font-bold text-emerald-600 hover:text-emerald-800 flex items-center gap-1 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" /> Unduh Excel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 3. MAIN CONTENT CONTAINER */}
+          <main className={`max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full ${(modalPrintOpen || modalBlankSheetOpen || modalDaftarPesertaOpen) ? 'no-print' : ''}`}>
+
+        {/* ==================================================== */}
+        {/* TAB 1: DASHBOARD DENGAN SAMBUTAN PENGGUNA & CHART PROGRES PENILAIAN */}
+        {/* ==================================================== */}
+        {currentTab === 'dashboard' && (
+          <div className="space-y-6">
+            {/* 1. SAMBUTAN PENGGUNA YANG LOGIN */}
+            <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 text-white rounded-2xl p-6 sm:p-7 shadow-lg border border-slate-800 relative overflow-hidden">
+              <div className="absolute right-0 top-0 bottom-0 w-1/3 opacity-10 pointer-events-none flex items-center justify-end pr-8">
+                <Shield className="w-64 h-64 text-blue-400" />
+              </div>
+
+              <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="bg-blue-500/20 text-blue-300 border border-blue-400/30 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider inline-flex items-center gap-1.5">
+                      <User className="w-3.5 h-3.5" />
+                      {currentUser.role === 'admin'
+                        ? 'Administrator Utama'
+                        : currentUser.role === 'juri'
+                        ? 'Juri Lapangan'
+                        : currentUser.role === 'sekolah'
+                        ? 'Perwakilan Resmi Sekolah'
+                        : 'Akun Tamu / Peninjau'}
+                    </span>
+                    <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 px-2.5 py-1 rounded-full text-xs font-semibold">
+                      Sistem Aktif
+                    </span>
+                  </div>
+
+                  <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
+                    Selamat Datang, {currentUser.name}!
+                  </h2>
+
+                  <p className="text-xs sm:text-sm text-slate-300 max-w-2xl leading-relaxed">
+                    Sistem Rekapitulasi & Penilaian Digital Lomba Baris-Berbaris (PBB) dan Patroli Keamanan Sekolah (PKS) Tingkat SLTP & SLTA.
+                    {currentUser.role === 'sekolah' && currentUser.schoolName && (
+                      <span className="block mt-1 text-blue-200 font-semibold">
+                        Kontingen Sekolah Terdaftar: <strong>{currentUser.schoolName}</strong> ({currentUser.schoolLevel || 'SLTP'}).
+                      </span>
+                    )}
+                  </p>
+                </div>
+
+                <div className="bg-slate-800/80 backdrop-blur-xs border border-slate-700/80 p-4 rounded-xl text-xs space-y-2 shrink-0 md:min-w-[240px]">
+                  <div className="text-slate-400 font-semibold uppercase text-[10px] tracking-wider">
+                    Informasi Sesi Login
+                  </div>
+                  <div className="flex items-center justify-between gap-3 text-slate-200">
+                    <span className="text-slate-400">Pengguna:</span>
+                    <strong className="text-white truncate">{currentUser.username}</strong>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 text-slate-200">
+                    <span className="text-slate-400">Waktu:</span>
+                    <span className="font-medium text-slate-300">
+                      {new Intl.DateTimeFormat('id-ID', {
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric'
+                      }).format(new Date())}
+                    </span>
+                  </div>
+                  {currentUser.role === 'sekolah' && currentUser.contactWa && (
+                    <div className="flex items-center justify-between gap-3 text-slate-200">
+                      <span className="text-slate-400">Kontak WA:</span>
+                      <span className="font-mono text-emerald-400">{currentUser.contactWa}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 2. 4 KARTU STATISTIK RINGKASAN PENILAIAN SEKOLAH */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Card 1: Total Sekolah Terdaftar */}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs flex items-center justify-between gap-3">
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-400 block mb-1">
+                    Sekolah Terdaftar
+                  </span>
+                  <div className="text-3xl font-black text-slate-900 tabular-nums">
+                    {dashboardProgressStats.totalRegistered}
+                  </div>
+                  <span className="text-[11px] text-slate-500 mt-1 block">
+                    Kontingen dalam basis data
+                  </span>
+                </div>
+                <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                  <Building2 className="w-6 h-6" />
+                </div>
+              </div>
+
+              {/* Card 2: Sudah Selesai 100% */}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs flex items-center justify-between gap-3">
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-600 block mb-1">
+                    Selesai Dinilai
+                  </span>
+                  <div className="text-3xl font-black text-emerald-700 tabular-nums">
+                    {dashboardProgressStats.completedCount}
+                  </div>
+                  <span className="text-[11px] text-slate-500 mt-1 block">
+                    {dashboardProgressStats.totalRegistered > 0
+                      ? `${Math.round((dashboardProgressStats.completedCount / dashboardProgressStats.totalRegistered) * 100)}% dari total sekolah`
+                      : 'Belum ada data'}
+                  </span>
+                </div>
+                <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                  <CheckCircle2 className="w-6 h-6" />
+                </div>
+              </div>
+
+              {/* Card 3: Belum Selesai / Belum Dinilai */}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs flex items-center justify-between gap-3">
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-600 block mb-1">
+                    Belum Selesai
+                  </span>
+                  <div className="text-3xl font-black text-amber-600 tabular-nums">
+                    {dashboardProgressStats.inProgressCount + dashboardProgressStats.unscoredCount}
+                  </div>
+                  <span className="text-[11px] text-slate-500 mt-1 block">
+                    {dashboardProgressStats.inProgressCount} proses, {dashboardProgressStats.unscoredCount} kosong
+                  </span>
+                </div>
+                <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+                  <Clock className="w-6 h-6" />
+                </div>
+              </div>
+
+              {/* Card 4: Persentase Progres */}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <span className="text-xs font-bold uppercase tracking-wider text-indigo-600 block mb-1">
+                    Progres Penilaian
+                  </span>
+                  <div className="text-3xl font-black text-indigo-700 tabular-nums">
+                    {dashboardProgressStats.completionRate}%
+                  </div>
+                  <div className="w-full bg-slate-100 rounded-full h-1.5 mt-2 overflow-hidden">
+                    <div
+                      className="bg-indigo-600 h-1.5 rounded-full transition-all duration-500"
+                      style={{ width: `${dashboardProgressStats.completionRate}%` }}
+                    />
+                  </div>
+                </div>
+                <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                  <BarChart3 className="w-6 h-6" />
+                </div>
+              </div>
+            </div>
+
+            {/* 3. CHART PROGRES PENILAIAN SEKOLAH (DONUT + MULTI-SEGMENT BAR) */}
+            <div className="bg-white rounded-2xl p-6 sm:p-7 border border-slate-200 shadow-sm space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+                <div>
+                  <h3 className="text-lg font-black text-slate-900 flex items-center gap-2">
+                    <PieChart className="w-5 h-5 text-blue-600" />
+                    Grafik Progres Penilaian Berdasarkan Sekolah Terdaftar
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Visualisasi sekolah yang sudah selesai (11/11 kategori), sedang berjalan, dan belum diisi nilai
+                  </p>
+                </div>
+
+                {/* Filter Jenjang & Pencarian */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex bg-slate-100 p-0.5 rounded-xl text-xs font-bold">
+                    {(['all', 'SLTP', 'SLTA'] as const).map(j => (
+                      <button
+                        key={j}
+                        type="button"
+                        onClick={() => setDashFilterJenjang(j)}
+                        className={`px-3 py-1.5 rounded-lg transition cursor-pointer ${
+                          dashFilterJenjang === j
+                            ? 'bg-white text-blue-600 shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {j === 'all' ? 'Semua Jenjang' : j}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                    <input
+                      type="text"
+                      value={dashSearchSekolah}
+                      onChange={e => setDashSearchSekolah(e.target.value)}
+                      placeholder="Cari sekolah..."
+                      className="pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none w-44"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Chart Visualizations Container */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+                {/* SVG Donut Chart (5 Cols) */}
+                <div className="lg:col-span-5 flex flex-col items-center justify-center p-4">
+                  <div className="relative w-48 h-48">
+                    {(() => {
+                      const total = dashboardProgressStats.totalRegistered || 1;
+                      const cPct = dashboardProgressStats.completedCount / total;
+                      const pPct = dashboardProgressStats.inProgressCount / total;
+                      const uPct = dashboardProgressStats.unscoredCount / total;
+
+                      const circ = 2 * Math.PI * 65; // ~408.4
+                      const cDash = cPct * circ;
+                      const pDash = pPct * circ;
+                      const uDash = uPct * circ;
+
+                      const cOffset = 0;
+                      const pOffset = -cDash;
+                      const uOffset = -(cDash + pDash);
+
+                      return (
+                        <>
+                          <svg className="w-full h-full -rotate-90 transform" viewBox="0 0 160 160">
+                            {/* Background Track */}
+                            <circle
+                              cx="80"
+                              cy="80"
+                              r="65"
+                              fill="none"
+                              stroke="#f1f5f9"
+                              strokeWidth="16"
+                            />
+                            {/* Segment 1: Completed (Emerald) */}
+                            {dashboardProgressStats.completedCount > 0 && (
+                              <circle
+                                cx="80"
+                                cy="80"
+                                r="65"
+                                fill="none"
+                                stroke="#10b981"
+                                strokeWidth="16"
+                                strokeDasharray={`${cDash} ${circ - cDash}`}
+                                strokeDashoffset={cOffset}
+                                className="transition-all duration-700"
+                              />
+                            )}
+                            {/* Segment 2: In Progress (Amber) */}
+                            {dashboardProgressStats.inProgressCount > 0 && (
+                              <circle
+                                cx="80"
+                                cy="80"
+                                r="65"
+                                fill="none"
+                                stroke="#f59e0b"
+                                strokeWidth="16"
+                                strokeDasharray={`${pDash} ${circ - pDash}`}
+                                strokeDashoffset={pOffset}
+                                className="transition-all duration-700"
+                              />
+                            )}
+                            {/* Segment 3: Unscored (Slate/Rose) */}
+                            {dashboardProgressStats.unscoredCount > 0 && (
+                              <circle
+                                cx="80"
+                                cy="80"
+                                r="65"
+                                fill="none"
+                                stroke="#cbd5e1"
+                                strokeWidth="16"
+                                strokeDasharray={`${uDash} ${circ - uDash}`}
+                                strokeDashoffset={uOffset}
+                                className="transition-all duration-700"
+                              />
+                            )}
+                          </svg>
+
+                          <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                            <span className="text-3xl font-black text-slate-900 tracking-tight">
+                              {dashboardProgressStats.completionRate}%
+                            </span>
+                            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                              Selesai
+                            </span>
+                            <span className="text-[10px] text-slate-400">
+                              {dashboardProgressStats.completedCount}/{dashboardProgressStats.totalRegistered} Sekolah
+                            </span>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* Legend & Breakdown Stats (7 Cols) */}
+                <div className="lg:col-span-7 space-y-4">
+                  {/* Multi-segment linear progress bar */}
+                  <div>
+                    <div className="flex justify-between text-xs font-bold text-slate-700 mb-1.5">
+                      <span>Distribusi Status Penilaian</span>
+                      <span>Total {dashboardProgressStats.totalRegistered} Sekolah</span>
+                    </div>
+                    <div className="h-4 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner">
+                      {dashboardProgressStats.totalRegistered > 0 ? (
+                        <>
+                          <div
+                            style={{
+                              width: `${(dashboardProgressStats.completedCount / dashboardProgressStats.totalRegistered) * 100}%`
+                            }}
+                            className="bg-emerald-500 transition-all duration-500"
+                            title={`Selesai: ${dashboardProgressStats.completedCount}`}
+                          />
+                          <div
+                            style={{
+                              width: `${(dashboardProgressStats.inProgressCount / dashboardProgressStats.totalRegistered) * 100}%`
+                            }}
+                            className="bg-amber-500 transition-all duration-500"
+                            title={`Sedang Berjalan: ${dashboardProgressStats.inProgressCount}`}
+                          />
+                          <div
+                            style={{
+                              width: `${(dashboardProgressStats.unscoredCount / dashboardProgressStats.totalRegistered) * 100}%`
+                            }}
+                            className="bg-slate-300 transition-all duration-500"
+                            title={`Belum Dinilai: ${dashboardProgressStats.unscoredCount}`}
+                          />
+                        </>
+                      ) : (
+                        <div className="w-full bg-slate-200" />
                       )}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {categories.map(cat => {
-                      const summary = activeCalc?.categorySummaries[cat.key];
-                      const isComplete = summary?.isComplete;
-                      const count = summary?.count || 0;
-                      const totalCrit = cat.criteria.length;
-                      const score = summary?.sum || 0;
-                      const pct = summary?.pct || 0;
+                  {/* 3 Detail Legend Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                    {/* Selesai 100% */}
+                    <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/50">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="w-3 h-3 rounded-full bg-emerald-500 shrink-0" />
+                        <span className="text-xs font-bold text-emerald-950">Sudah Selesai</span>
+                      </div>
+                      <div className="text-xl font-black text-emerald-800">
+                        {dashboardProgressStats.completedCount} <span className="text-xs font-normal text-emerald-700">Sekolah</span>
+                      </div>
+                      <p className="text-[10px] text-emerald-600 mt-0.5">
+                        Lengkap dinilai 11 dari 11 mata lomba
+                      </p>
+                    </div>
 
-                      return (
-                        <div
-                          key={cat.key}
-                          className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs flex flex-col justify-between hover:border-blue-300 transition"
-                        >
-                          <div>
-                            <div className="flex justify-between items-start mb-2">
-                              <span className="text-[11px] font-semibold text-slate-400">
-                                {cat.group}
-                              </span>
-                              <span
-                                className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
-                                  isComplete
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : count > 0
-                                    ? 'bg-amber-100 text-amber-800'
-                                    : 'bg-slate-100 text-slate-600'
-                                }`}
-                              >
-                                {isComplete
-                                  ? 'Selesai (100%)'
-                                  : count > 0
-                                  ? `${count}/${totalCrit} Dinilai`
-                                  : 'Belum Dinilai'}
-                              </span>
-                            </div>
+                    {/* Sedang Berjalan */}
+                    <div className="p-3.5 rounded-xl border border-amber-200 bg-amber-50/50">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="w-3 h-3 rounded-full bg-amber-500 shrink-0" />
+                        <span className="text-xs font-bold text-amber-950">Sedang Berjalan</span>
+                      </div>
+                      <div className="text-xl font-black text-amber-800">
+                        {dashboardProgressStats.inProgressCount} <span className="text-xs font-normal text-amber-700">Sekolah</span>
+                      </div>
+                      <p className="text-[10px] text-amber-600 mt-0.5">
+                        Sebagian kategori telah dinilai (1 - 10)
+                      </p>
+                    </div>
 
-                            <h4 className="font-bold text-slate-900 text-base leading-snug">
-                              {cat.title}
-                            </h4>
-                            <p className="text-xs text-slate-500 mb-3">
-                              {totalCrit} Kriteria Penilaian
-                            </p>
-
-                            <div className="flex items-baseline gap-1.5 mb-2">
-                              <span className="text-3xl font-black text-slate-900 tabular-nums">
-                                {score}
-                              </span>
-                              <span className="text-xs text-slate-400 font-semibold">
-                                / {cat.maxPoints} Poin
-                              </span>
-                            </div>
-
-                            <div className="w-full bg-slate-100 rounded-full h-2 mb-1.5 overflow-hidden">
-                              <div
-                                className={`h-2 rounded-full transition-all duration-500 ${
-                                  isComplete ? 'bg-emerald-500' : 'bg-blue-600'
-                                }`}
-                                style={{ width: `${Math.min(100, pct)}%` }}
-                              />
-                            </div>
-                            <div className="flex justify-between text-[11px] text-slate-400">
-                              <span>Pencapaian</span>
-                              <span className="font-bold text-slate-700">{pct.toFixed(1)}%</span>
-                            </div>
-                          </div>
-
-                          <div className="mt-4 flex gap-2">
-                            <button
-                              onClick={() => setCurrentTab(cat.key)}
-                              className="flex-1 bg-slate-50 hover:bg-blue-50 text-blue-700 font-bold py-2 rounded-xl text-xs border border-slate-200 hover:border-blue-200 transition cursor-pointer flex items-center justify-center gap-1.5"
-                            >
-                              Buka Lembar Penilaian
-                            </button>
-                            <button
-                              onClick={() => handleDownloadBlankScoreSheet(cat.key)}
-                              title="Download Format Blanko Excel (.xlsx)"
-                              className="px-2.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-xl text-xs font-bold border border-emerald-200 transition cursor-pointer flex items-center gap-1"
-                            >
-                              <Download className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">Blanko</span>
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
+                    {/* Belum Diisi Nilai */}
+                    <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="w-3 h-3 rounded-full bg-slate-400 shrink-0" />
+                        <span className="text-xs font-bold text-slate-900">Belum Dinilai</span>
+                      </div>
+                      <div className="text-xl font-black text-slate-700">
+                        {dashboardProgressStats.unscoredCount} <span className="text-xs font-normal text-slate-600">Sekolah</span>
+                      </div>
+                      <p className="text-[10px] text-slate-500 mt-0.5">
+                        Menunggu penilaian juri di lapangan
+                      </p>
+                    </div>
                   </div>
                 </div>
-              </>
-            )}
+              </div>
+            </div>
+
+            {/* 4. TABEL DAFTAR SEKOLAH & PROGRES PENILAIAN */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/50">
+                <div>
+                  <h4 className="font-bold text-sm sm:text-base text-slate-900 flex items-center gap-2">
+                    <ListChecks className="w-4 h-4 text-blue-600" />
+                    Status Penilaian Berdasarkan Sekolah Terdaftar
+                  </h4>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Rincian progres pengisian nilai untuk setiap peserta dan asal sekolah
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {isAdminRole && (
+                    <button
+                      onClick={() => setModalSchoolAccountsOpen(true)}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                    >
+                      <Building2 className="w-3.5 h-3.5" /> Kelola Akun Sekolah
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleExportDaftarPesertaExcel('all')}
+                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" /> Unduh Daftar Excel
+                  </button>
+                  {!isUserRole && (
+                    <button
+                      onClick={openNewPesertaModal}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" /> Tambah Peserta
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {dashboardProgressStats.schoolProgressList.length === 0 ? (
+                <div className="p-8 text-center text-slate-500 text-xs">
+                  Tidak ada data sekolah yang sesuai dengan filter pencarian.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs text-left">
+                    <thead className="bg-slate-100 text-slate-600 uppercase font-black tracking-wider text-[10px] border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-4">No. Peserta</th>
+                        <th className="py-3 px-4">Asal Sekolah & Peleton</th>
+                        <th className="py-3 px-3 text-center">Jenjang</th>
+                        <th className="py-3 px-4">Progres Penilaian</th>
+                        <th className="py-3 px-4 text-center">Total Nilai</th>
+                        <th className="py-3 px-4 text-center">Status</th>
+                        <th className="py-3 px-4 text-right">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {dashboardProgressStats.schoolProgressList.map(item => {
+                        const p = item.participant;
+                        const isCurrentActive = p.id === activePesertaId;
+
+                        return (
+                          <tr
+                            key={p.id}
+                            className={`hover:bg-blue-50/40 transition ${
+                              isCurrentActive ? 'bg-blue-50/70 font-medium' : ''
+                            }`}
+                          >
+                            <td className="py-3 px-4 font-black text-slate-900">
+                              <span className="bg-slate-100 border border-slate-300 px-2 py-0.5 rounded-md font-mono">
+                                No. {p.nomor}
+                              </span>
+                            </td>
+
+                            <td className="py-3 px-4">
+                              <div className="font-bold text-slate-900">{p.sekolah}</div>
+                              {p.peleton && (
+                                <div className="text-[11px] text-slate-500">Peleton: {p.peleton}</div>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-3 text-center">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-black uppercase text-white ${
+                                  p.jenjang === 'SLTA' ? 'bg-indigo-600' : 'bg-blue-600'
+                                }`}
+                              >
+                                {p.jenjang || 'SLTP'}
+                              </span>
+                            </td>
+
+                            <td className="py-3 px-4 min-w-[180px]">
+                              <div className="flex items-center justify-between text-[11px] mb-1">
+                                <span className="font-semibold text-slate-700">
+                                  {item.completedCats} / 11 Kategori
+                                </span>
+                                <span className="font-mono text-slate-500">
+                                  {item.pct.toFixed(0)}%
+                                </span>
+                              </div>
+                              <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                                <div
+                                  className={`h-1.5 rounded-full ${
+                                    item.isComplete
+                                      ? 'bg-emerald-500'
+                                      : item.completedCats > 0
+                                      ? 'bg-amber-500'
+                                      : 'bg-slate-300'
+                                  }`}
+                                  style={{ width: `${(item.completedCats / 11) * 100}%` }}
+                                />
+                              </div>
+                            </td>
+
+                            <td className="py-3 px-4 text-center font-black text-sm tabular-nums text-slate-900">
+                              {item.grandTotal > 0 ? (
+                                <span className="text-blue-600">{item.grandTotal}</span>
+                              ) : (
+                                <span className="text-slate-400 font-normal">0</span>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4 text-center">
+                              {item.isComplete ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Selesai 100%
+                                </span>
+                              ) : item.completedCats > 0 ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
+                                  <Clock className="w-3 h-3 text-amber-600" /> Proses ({item.completedCats}/11)
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">
+                                  Belum Diisi
+                                </span>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActivePesertaId(p.id);
+                                    setCurrentTab('pbb');
+                                  }}
+                                  className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold rounded-lg text-[11px] transition cursor-pointer"
+                                  title="Buka form penilaian untuk peserta ini"
+                                >
+                                  Nilai
+                                </button>
+                                {!isUserRole && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditPesertaModal(p)}
+                                    className="p-1 hover:bg-slate-100 text-slate-500 hover:text-slate-800 rounded-lg transition cursor-pointer"
+                                    title="Edit data sekolah/peserta"
+                                  >
+                                    <Edit className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -3826,12 +5481,38 @@ export default function App() {
             )}
           </div>
         )}
+
+        {/* ==================================================== */}
+        {/* TAB KERANGKA: FORMULIR PENDAFTARAN RESMI PKS */}
+        {/* ==================================================== */}
+        {['form_polisi_pelajar', 'form_calon_pks', 'form_perkemahan_balok1', 'form_perkemahan_balok2'].includes(currentTab) && (
+          <RegistrationFormsView
+            currentTab={currentTab}
+            setCurrentTab={setCurrentTab}
+            appLogo={appLogo}
+            formPolisiPelajar={formPolisiPelajar}
+            setFormPolisiPelajar={setFormPolisiPelajar}
+            handleExportFormPolisiPelajarExcel={handleExportFormPolisiPelajarExcel}
+            formCalonPks={formCalonPks}
+            setFormCalonPks={setFormCalonPks}
+            handleExportFormCalonPksExcel={handleExportFormCalonPksExcel}
+            formBalok1={formBalok1}
+            setFormBalok1={setFormBalok1}
+            handleExportFormBalok1Excel={handleExportFormBalok1Excel}
+            formBalok2={formBalok2}
+            setFormBalok2={setFormBalok2}
+            handleExportFormBalok2Excel={handleExportFormBalok2Excel}
+            showToast={showToast}
+          />
+        )}
       </main>
 
-      {/* FOOTER */}
-      <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500 no-print mt-auto">
-        Sistem Rekapitulasi Nilai Lomba PBB & PKS © 2026 • Rekap Juara Umum & Peringkat Seluruh Kategori Perlombaan.
-      </footer>
+        {/* FOOTER */}
+        <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500 no-print mt-auto">
+          Sistem Rekapitulasi Nilai Lomba PBB & PKS © 2026 • Rekap Juara Umum & Peringkat Seluruh Kategori Perlombaan.
+        </footer>
+      </div>
+    </div>
 
       {/* ==================================================== */}
       {/* MODAL: KELOLA PENGGUNA (TAMBAH USER BARU - ADMIN) */}
@@ -3968,9 +5649,59 @@ export default function App() {
                   >
                     <option value="juri">Juri Lapangan (Bisa Input, Upload Foto Form, & Perbarui Nilai Lomba)</option>
                     <option value="admin">Administrator (Akses Penuh Kelola Data, User, Nilai & Ekspor)</option>
-                    <option value="user">User / Tamu / Kontingen (Hanya Lihat Nilai Mentah & Cetak)</option>
+                    <option value="sekolah">Perwakilan Sekolah (Kelola Kontingen & Formulir Pendaftaran)</option>
+                    <option value="user">User / Tamu / Peninjau (Hanya Lihat Nilai Mentah & Cetak)</option>
                   </select>
                 </div>
+
+                {userFormData.role === 'sekolah' && (
+                  <div className="bg-emerald-50 border border-emerald-200 p-3.5 rounded-xl space-y-3">
+                    <p className="text-xs font-bold text-emerald-900">Data Khusus Akun Sekolah:</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">Nama Lengkap Sekolah</label>
+                        <input
+                          type="text"
+                          value={userFormData.schoolName || ''}
+                          onChange={e => setUserFormData(prev => ({ ...prev, schoolName: e.target.value }))}
+                          placeholder="SMP Negeri 1..."
+                          className="w-full border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">Jenjang</label>
+                        <select
+                          value={userFormData.schoolLevel || 'SLTP'}
+                          onChange={e => setUserFormData(prev => ({ ...prev, schoolLevel: e.target.value as SchoolLevel }))}
+                          className="w-full border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white outline-none font-bold"
+                        >
+                          <option value="SLTP">SLTP (SMP / MTs)</option>
+                          <option value="SLTA">SLTA (SMA / SMK / MA)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">Nama Pembina</label>
+                        <input
+                          type="text"
+                          value={userFormData.pembinaName || ''}
+                          onChange={e => setUserFormData(prev => ({ ...prev, pembinaName: e.target.value }))}
+                          placeholder="Nama guru pembina..."
+                          className="w-full border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">No. WhatsApp</label>
+                        <input
+                          type="text"
+                          value={userFormData.contactWa || ''}
+                          onChange={e => setUserFormData(prev => ({ ...prev, contactWa: e.target.value }))}
+                          placeholder="081234..."
+                          className="w-full border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white outline-none font-mono"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="pt-3 flex justify-end gap-2 border-t border-slate-200">
                   <button
@@ -4070,12 +5801,62 @@ export default function App() {
                   >
                     <option value="juri">Juri Lapangan (Bisa Input, Upload Foto Form, & Perbarui Nilai Lomba)</option>
                     <option value="admin">Administrator (Akses Penuh Kelola Data, User, Nilai & Ekspor)</option>
-                    <option value="user">User / Tamu / Kontingen (Hanya Lihat Nilai Mentah & Cetak)</option>
+                    <option value="sekolah">Perwakilan Sekolah (Kelola Kontingen & Formulir Pendaftaran)</option>
+                    <option value="user">User / Tamu / Peninjau (Hanya Lihat Nilai Mentah & Cetak)</option>
                   </select>
                   {editingUserOriginalUsername === 'admin' && (
                     <p className="text-[11px] text-slate-400 mt-1">Hak akses Administrator Utama tidak dapat diturunkan.</p>
                   )}
                 </div>
+
+                {userFormData.role === 'sekolah' && (
+                  <div className="bg-amber-50 border border-amber-200 p-3.5 rounded-xl space-y-3">
+                    <p className="text-xs font-bold text-amber-900">Data Khusus Akun Sekolah:</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">Nama Lengkap Sekolah</label>
+                        <input
+                          type="text"
+                          value={userFormData.schoolName || ''}
+                          onChange={e => setUserFormData(prev => ({ ...prev, schoolName: e.target.value }))}
+                          placeholder="SMP Negeri 1..."
+                          className="w-full border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">Jenjang</label>
+                        <select
+                          value={userFormData.schoolLevel || 'SLTP'}
+                          onChange={e => setUserFormData(prev => ({ ...prev, schoolLevel: e.target.value as SchoolLevel }))}
+                          className="w-full border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white outline-none font-bold"
+                        >
+                          <option value="SLTP">SLTP (SMP / MTs)</option>
+                          <option value="SLTA">SLTA (SMA / SMK / MA)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">Nama Pembina</label>
+                        <input
+                          type="text"
+                          value={userFormData.pembinaName || ''}
+                          onChange={e => setUserFormData(prev => ({ ...prev, pembinaName: e.target.value }))}
+                          placeholder="Nama guru pembina..."
+                          className="w-full border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 font-bold mb-1">No. WhatsApp</label>
+                        <input
+                          type="text"
+                          value={userFormData.contactWa || ''}
+                          onChange={e => setUserFormData(prev => ({ ...prev, contactWa: e.target.value }))}
+                          placeholder="081234..."
+                          className="w-full border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white outline-none font-mono"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="pt-3 flex justify-end gap-2 border-t border-slate-200">
                   <button
@@ -4139,9 +5920,11 @@ export default function App() {
                                 ? 'bg-rose-100 text-rose-800'
                                 : u.role === 'juri'
                                 ? 'bg-blue-100 text-blue-800'
+                                : u.role === 'sekolah'
+                                ? 'bg-purple-100 text-purple-800'
                                 : 'bg-emerald-100 text-emerald-800'
                             }`}>
-                              {u.role}
+                              {u.role === 'sekolah' ? 'SEKOLAH' : u.role}
                             </span>
                           </td>
                           <td className="p-3 text-center">
@@ -4829,6 +6612,313 @@ export default function App() {
       })()}
 
       {/* ==================================================== */}
+      {/* MODAL: DAFTAR NAMA PESERTA & SEKOLAH (DOWNLOAD & CETAK) */}
+      {/* ==================================================== */}
+      {modalDaftarPesertaOpen && (() => {
+        const filteredList = pesertaList.filter(p => {
+          const matchJenjang = daftarPesertaFilterJenjang === 'all' || (p.jenjang || 'SLTP') === daftarPesertaFilterJenjang;
+          const q = daftarPesertaSearch.toLowerCase().trim();
+          const matchSearch =
+            !q ||
+            p.sekolah.toLowerCase().includes(q) ||
+            p.nomor.toLowerCase().includes(q) ||
+            (p.peleton && p.peleton.toLowerCase().includes(q)) ||
+            p.juri.toLowerCase().includes(q);
+          return matchJenjang && matchSearch;
+        });
+
+        const totalSLTP = pesertaList.filter(p => (p.jenjang || 'SLTP') === 'SLTP').length;
+        const totalSLTA = pesertaList.filter(p => p.jenjang === 'SLTA').length;
+
+        return (
+          <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-xs z-50 overflow-y-auto p-4 sm:p-6 flex justify-center print:p-0 print:bg-white">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full my-auto border border-slate-200 overflow-hidden flex flex-col max-h-[94vh] print-modal-container">
+              {/* Toolbar Atas (no-print) */}
+              <div className="bg-slate-900 text-white px-5 py-4 flex flex-wrap justify-between items-center gap-3 no-print shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-blue-600 rounded-xl text-white">
+                    <Users className="w-5 h-5 text-amber-300" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base leading-tight flex items-center gap-2">
+                      <span>Daftar Nama Peserta & Sekolah Kontingen</span>
+                      <span className="text-[11px] bg-blue-500/30 text-blue-300 px-2 py-0.5 rounded-full border border-blue-400/30">
+                        {pesertaList.length} Terdaftar
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Daftar resmi kontingen lomba PKS. Siap diunduh ke Excel (.xlsx) atau dicetak untuk presensi juri/panitia.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Unduh Excel Sesuai Filter */}
+                  <button
+                    onClick={() => handleExportDaftarPesertaExcel(daftarPesertaFilterJenjang)}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow cursor-pointer transition"
+                    title="Unduh seluruh daftar nama peserta & sekolah ke format Excel (.xlsx)"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Unduh Excel (.xlsx)</span>
+                  </button>
+
+                  {/* Cetak / Simpan PDF */}
+                  <button
+                    onClick={() => window.print()}
+                    className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow cursor-pointer transition"
+                    title="Cetak lembar daftar hadir / presensi peserta lomba"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>Cetak / PDF</span>
+                  </button>
+
+                  <button
+                    onClick={() => setModalDaftarPesertaOpen(false)}
+                    className="text-slate-400 hover:text-white p-1 ml-1 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Filter Bar (no-print) */}
+              <div className="bg-slate-50 border-b border-slate-200 p-3.5 flex flex-wrap items-center justify-between gap-3 no-print shrink-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-500">Filter Tingkat:</span>
+                  <div className="inline-flex rounded-xl bg-white border border-slate-300 p-0.5 text-xs font-bold">
+                    <button
+                      onClick={() => setDaftarPesertaFilterJenjang('all')}
+                      className={`px-3 py-1 rounded-lg transition cursor-pointer ${
+                        daftarPesertaFilterJenjang === 'all'
+                          ? 'bg-blue-600 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Semua ({pesertaList.length})
+                    </button>
+                    <button
+                      onClick={() => setDaftarPesertaFilterJenjang('SLTP')}
+                      className={`px-3 py-1 rounded-lg transition cursor-pointer ${
+                        daftarPesertaFilterJenjang === 'SLTP'
+                          ? 'bg-blue-600 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      SLTP ({totalSLTP})
+                    </button>
+                    <button
+                      onClick={() => setDaftarPesertaFilterJenjang('SLTA')}
+                      className={`px-3 py-1 rounded-lg transition cursor-pointer ${
+                        daftarPesertaFilterJenjang === 'SLTA'
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      SLTA ({totalSLTA})
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-1 max-w-xs">
+                  <div className="relative w-full">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      placeholder="Cari sekolah, no, atau peleton..."
+                      value={daftarPesertaSearch}
+                      onChange={e => setDaftarPesertaSearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                    />
+                  </div>
+                  {daftarPesertaSearch && (
+                    <button
+                      onClick={() => setDaftarPesertaSearch('')}
+                      className="text-xs text-slate-400 hover:text-slate-700"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Tabel Daftar Peserta & Sekolah */}
+              <div className="p-6 sm:p-8 overflow-y-auto flex-1 bg-white">
+                {/* Header Dokumen Cetak */}
+                <div className="text-center border-b-2 border-slate-900 pb-3 mb-5">
+                  <h3 className="text-xs uppercase font-bold tracking-widest text-slate-500">
+                    PANITIA PELAKSANA LOMBA PATROLI KEAMANAN SEKOLAH (PKS) TAHUN 2026
+                  </h3>
+                  <h2 className="text-lg sm:text-xl font-black tracking-wide uppercase mt-0.5">
+                    DAFTAR RESMI NAMA PESERTA & KONTINGEN SEKOLAH
+                  </h2>
+                  <div className="flex flex-wrap justify-center items-center gap-3 mt-1.5 text-xs">
+                    <span className="font-extrabold text-blue-900 bg-blue-50 px-2.5 py-0.5 rounded border border-blue-200">
+                      TINGKAT: {daftarPesertaFilterJenjang === 'all' ? 'SEMUA TINGKAT (SLTP & SLTA)' : daftarPesertaFilterJenjang}
+                    </span>
+                    <span className="font-bold text-slate-700">
+                      Total: {filteredList.length} Kontingen Terdaftar
+                    </span>
+                    <span className="text-slate-500">
+                      Tanggal: {new Date().toLocaleDateString('id-ID')}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="border border-slate-300 rounded-xl overflow-hidden shadow-2xs mb-5">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead className="bg-slate-100 font-bold uppercase text-slate-700 border-b border-slate-300">
+                      <tr>
+                        <th className="py-3 px-3 text-center w-12 border-r border-slate-200">No</th>
+                        <th className="py-3 px-3 text-center w-20 border-r border-slate-200">No. Peserta</th>
+                        <th className="py-3 px-3 text-center w-20 border-r border-slate-200">Tingkat</th>
+                        <th className="py-3 px-4 border-r border-slate-200">Nama Sekolah & Peleton</th>
+                        <th className="py-3 px-3 border-r border-slate-200">Hari / Tanggal</th>
+                        <th className="py-3 px-3 border-r border-slate-200">Juri Penilai</th>
+                        <th className="py-3 px-3 text-center border-r border-slate-200">Kelengkapan</th>
+                        <th className="py-3 px-3 text-center border-r border-slate-200">Total Nilai</th>
+                        <th className="py-3 px-3 text-center w-28 no-print">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 font-medium">
+                      {filteredList.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="py-8 text-center text-slate-400">
+                            Tidak ada peserta atau sekolah yang cocok dengan pencarian / filter ini.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredList.map((p, index) => {
+                          const calc = calculateAllCategories(p, categories);
+                          const isComplete = calc?.mandatoryCompleted;
+                          const completedCount = calc?.completedCategoriesCount || 0;
+                          const totalCat = categories.length;
+                          const grandTotal = calc?.grandTotal || 0;
+                          const isActive = activePesertaId === p.id;
+
+                          return (
+                            <tr
+                              key={p.id}
+                              className={`hover:bg-blue-50/40 transition ${
+                                isActive ? 'bg-blue-50/60 font-semibold' : ''
+                              }`}
+                            >
+                              <td className="py-3 px-3 text-center text-slate-400 border-r border-slate-200">
+                                {index + 1}
+                              </td>
+                              <td className="py-3 px-3 text-center font-bold text-slate-900 border-r border-slate-200 font-mono">
+                                {p.nomor}
+                              </td>
+                              <td className="py-3 px-3 text-center border-r border-slate-200">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                                    p.jenjang === 'SLTA'
+                                      ? 'bg-indigo-100 text-indigo-800'
+                                      : 'bg-blue-100 text-blue-800'
+                                  }`}
+                                >
+                                  {p.jenjang || 'SLTP'}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 border-r border-slate-200">
+                                <strong className="text-slate-900 block text-sm leading-snug">
+                                  {p.sekolah}
+                                </strong>
+                                {p.peleton ? (
+                                  <span className="text-xs text-blue-600 font-medium">{p.peleton}</span>
+                                ) : (
+                                  <span className="text-xs text-slate-400 italic">Tanpa Nama Regu</span>
+                                )}
+                              </td>
+                              <td className="py-3 px-3 text-slate-700 border-r border-slate-200">
+                                {p.tanggal}
+                              </td>
+                              <td className="py-3 px-3 text-slate-700 border-r border-slate-200">
+                                {p.juri}
+                              </td>
+                              <td className="py-3 px-3 text-center border-r border-slate-200">
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    isComplete
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : completedCount > 0
+                                      ? 'bg-amber-100 text-amber-800'
+                                      : 'bg-slate-100 text-slate-500'
+                                  }`}
+                                >
+                                  {completedCount} / {totalCat} Selesai
+                                </span>
+                              </td>
+                              <td className="py-3 px-3 text-center font-bold text-slate-900 border-r border-slate-200 tabular-nums">
+                                {grandTotal > 0 ? (
+                                  <div>
+                                    <span className="text-blue-700 font-black">{grandTotal}</span>
+                                    <span className="text-[10px] text-slate-400 block">
+                                      {(calc?.grandPct || 0).toFixed(1)}%
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400 font-normal">-</span>
+                                )}
+                              </td>
+                              <td className="py-3 px-3 text-center no-print">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    onClick={() => {
+                                      setActivePesertaId(p.id);
+                                      setModalDaftarPesertaOpen(false);
+                                      showToast(`Peserta aktif dialihkan ke ${p.sekolah}`);
+                                    }}
+                                    className="px-2 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-xs font-bold transition cursor-pointer"
+                                    title="Pilih & Buka Penilaian Peserta Ini"
+                                  >
+                                    Pilih
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setPrintPesertaId(p.id);
+                                      setModalPrintOpen(true);
+                                    }}
+                                    className="p-1 text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
+                                    title="Cetak Lembar Nilai Peserta"
+                                  >
+                                    <Printer className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Footer Dokumen Cetak & Ringkasan */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-end pt-2 text-xs">
+                  <div className="space-y-1 text-slate-600">
+                    <p><strong>Total Peserta Terdaftar:</strong> {pesertaList.length} Kontingen Sekolah</p>
+                    <p><strong>Rincian Tingkat:</strong> {totalSLTP} Sekolah SLTP, {totalSLTA} Sekolah SLTA</p>
+                    <p className="text-[11px] text-slate-400 italic">
+                      Dicetak otomatis melalui Sistem Rekapitulasi Nilai Lomba PKS pada {new Date().toLocaleString('id-ID')}.
+                    </p>
+                  </div>
+
+                  <div className="text-center text-xs space-y-1">
+                    <p className="text-slate-600">..........................., ........................................ 2026</p>
+                    <p className="font-bold text-slate-800">Ketua Panitia Pelaksana Lomba,</p>
+                    <div className="h-14" />
+                    <p className="font-bold underline text-slate-900">( ..................................................................... )</p>
+                    <p className="text-[11px] text-slate-500">NIP / NRP Panitia</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ==================================================== */}
       {/* MODAL: IN-APP CONFIRMATION */}
       {/* ==================================================== */}
       {confirmModal.isOpen && (
@@ -5240,6 +7330,33 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ==================================================== */}
+      {/* MODAL: PENGATURAN LOGO APLIKASI */}
+      {/* ==================================================== */}
+      <LogoSettingModal
+        isOpen={modalLogoOpen}
+        onClose={() => setModalLogoOpen(false)}
+        currentLogo={appLogo}
+        onSaveLogo={handleSaveLogoUrl}
+        onResetLogo={handleResetLogo}
+        showToast={showToast}
+      />
+
+      {/* ==================================================== */}
+      {/* MODAL: KELOLA AKUN SEKOLAH */}
+      {/* ==================================================== */}
+      <SchoolAccountManagerModal
+        isOpen={modalSchoolAccountsOpen}
+        onClose={() => setModalSchoolAccountsOpen(false)}
+        usersList={usersList}
+        setUsersList={setUsersList}
+        pesertaList={pesertaList}
+        setPesertaList={setPesertaList}
+        currentUser={currentUser}
+        setCurrentUser={setCurrentUser}
+        showToast={showToast}
+      />
 
       {/* ==================================================== */}
       {/* TOAST NOTIFICATION */}

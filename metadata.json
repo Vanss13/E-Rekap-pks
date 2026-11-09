@@ -1,6 +1,8 @@
 {
   "name": "Sistem Rekapitulasi Nilai Lomba PBB & PKS",
-  "description": "Aplikasi rekapitulasi nilai lomba PBB dan PKS terpadu 750 poin dengan otentikasi multi-user (Admin, Juri, User) berbasis peran.",
+  "description": "Aplikasi rekapitulasi nilai lomba  PKS terpadu otentikasi multi-user (Admin, Juri, User) berbasis peran.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
