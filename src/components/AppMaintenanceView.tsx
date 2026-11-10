@@ -11,7 +11,8 @@ import {
   EyeOff,
   User,
   CheckCircle2,
-  RefreshCw
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
 import { AppStatusConfig } from '../lib/firebase';
 import { AppUser } from '../App';
@@ -36,37 +37,44 @@ export const AppMaintenanceView: React.FC<AppMaintenanceViewProps> = ({
   const [adminPassword, setAdminPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState('');
+  const [isAdminLoggingIn, setIsAdminLoggingIn] = useState(false);
 
   const handleAdminLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
+    setIsAdminLoggingIn(true);
 
     const uname = adminUsername.trim().toLowerCase();
     const pwd = adminPassword.trim();
 
-    const userFound = usersList.find(
-      u => u.username.toLowerCase() === uname && u.password === pwd
-    );
+    setTimeout(() => {
+      const userFound = usersList.find(
+        u => u.username.toLowerCase() === uname && u.password === pwd
+      );
 
-    if (!userFound) {
-      setLoginError('Username atau password tidak cocok!');
-      return;
-    }
+      if (!userFound) {
+        setIsAdminLoggingIn(false);
+        setLoginError('Username atau password tidak cocok!');
+        return;
+      }
 
-    const isSuperAdmin =
-      userFound.role === 'superadmin' ||
-      (userFound.role === 'admin' &&
-        (userFound.username.toLowerCase() === 'admin' ||
-          userFound.username.toLowerCase() === 'administrator'));
+      const isSuperAdmin =
+        userFound.role === 'superadmin' ||
+        (userFound.role === 'admin' &&
+          (userFound.username.toLowerCase() === 'admin' ||
+            userFound.username.toLowerCase() === 'administrator'));
 
-    if (!isSuperAdmin) {
-      setLoginError('Akses ditolak: Akun Anda memiliki hak akses terbatas. Saat aplikasi dinonaktifkan, hanya Administrator Utama yang memiliki wewenang membuka sistem.');
-      return;
-    }
+      if (!isSuperAdmin) {
+        setIsAdminLoggingIn(false);
+        setLoginError('Akses ditolak: Akun Anda memiliki hak akses terbatas. Saat aplikasi dinonaktifkan, hanya Administrator Utama yang memiliki wewenang membuka sistem.');
+        return;
+      }
 
-    showToast(`Login Administrator Utama "${userFound.name}" berhasil! Membuka akses kontrol.`, 'success');
-    onAdminLoginSuccess(userFound);
-    setShowAdminLoginModal(false);
+      showToast(`Login Administrator Utama "${userFound.name}" berhasil! Membuka akses kontrol.`, 'success');
+      setIsAdminLoggingIn(false);
+      onAdminLoginSuccess(userFound);
+      setShowAdminLoginModal(false);
+    }, 600);
   };
 
   return (
@@ -247,10 +255,11 @@ export const AppMaintenanceView: React.FC<AppMaintenanceViewProps> = ({
                     type="text"
                     required
                     autoFocus
+                    disabled={isAdminLoggingIn}
                     value={adminUsername}
                     onChange={e => setAdminUsername(e.target.value)}
                     placeholder="Username admin..."
-                    className="w-full pl-9 pr-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:ring-2 focus:ring-amber-500 outline-none"
+                    className="w-full pl-9 pr-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:ring-2 focus:ring-amber-500 outline-none disabled:opacity-60"
                   />
                 </div>
               </div>
@@ -264,15 +273,17 @@ export const AppMaintenanceView: React.FC<AppMaintenanceViewProps> = ({
                   <input
                     type={showPassword ? 'text' : 'password'}
                     required
+                    disabled={isAdminLoggingIn}
                     value={adminPassword}
                     onChange={e => setAdminPassword(e.target.value)}
                     placeholder="Password admin..."
-                    className="w-full pl-9 pr-10 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:ring-2 focus:ring-amber-500 outline-none"
+                    className="w-full pl-9 pr-10 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:ring-2 focus:ring-amber-500 outline-none disabled:opacity-60"
                   />
                   <button
                     type="button"
+                    disabled={isAdminLoggingIn}
                     onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-2.5 text-slate-400 hover:text-white"
+                    className="absolute right-3 top-2.5 text-slate-400 hover:text-white disabled:opacity-60"
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -282,17 +293,28 @@ export const AppMaintenanceView: React.FC<AppMaintenanceViewProps> = ({
               <div className="pt-2 flex justify-end gap-2">
                 <button
                   type="button"
+                  disabled={isAdminLoggingIn}
                   onClick={() => setShowAdminLoginModal(false)}
-                  className="px-4 py-2 border border-slate-700 text-slate-300 hover:bg-slate-800 rounded-xl text-xs font-bold transition"
+                  className="px-4 py-2 border border-slate-700 text-slate-300 hover:bg-slate-800 rounded-xl text-xs font-bold transition disabled:opacity-60"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5"
+                  disabled={isAdminLoggingIn}
+                  className="px-5 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-75 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5"
                 >
-                  <LogIn className="w-3.5 h-3.5" />
-                  <span>Masuk Administrator</span>
+                  {isAdminLoggingIn ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Memverifikasi...</span>
+                    </>
+                  ) : (
+                    <>
+                      <LogIn className="w-3.5 h-3.5" />
+                      <span>Masuk Administrator</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>

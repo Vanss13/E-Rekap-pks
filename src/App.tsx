@@ -631,6 +631,9 @@ export default function App() {
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [loginStepText, setLoginStepText] = useState('Memverifikasi kredensial akun...');
+  const [isRegisteringSchool, setIsRegisteringSchool] = useState(false);
 
   // Category Configuration
   const [categories, setCategories] = useState<CategoryConfig[]>(() => {
@@ -1145,17 +1148,49 @@ export default function App() {
   // Auth Handlers
   const handleLoginSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const found = usersList.find(
-      u => u.username.toLowerCase() === loginUsername.trim().toLowerCase() && u.password === loginPassword
-    );
-    if (found) {
-      setLoginError(false);
-      setCurrentUser(found);
-      sessionStorage.setItem(AUTH_KEY, JSON.stringify(found));
-      showToast(`Selamat datang, ${found.name}!`);
-    } else {
-      setLoginError(true);
-    }
+    if (isLoggingIn) return;
+
+    const uname = loginUsername.trim().toLowerCase();
+    const pwd = loginPassword;
+
+    setIsLoggingIn(true);
+    setLoginStepText('Memverifikasi kredensial akun...');
+    setLoginError(false);
+
+    // Animasi bertahap untuk verifikasi akun dan inisialisasi sesi
+    setTimeout(() => {
+      const found = usersList.find(
+        u => u.username.toLowerCase() === uname && u.password === pwd
+      );
+
+      if (found) {
+        const isSuper =
+          found.role === 'superadmin' ||
+          found.username.toLowerCase() === 'admin' ||
+          found.username.toLowerCase() === 'administrator';
+        const roleLabel = isSuper
+          ? 'Administrator Utama'
+          : found.role === 'admin'
+          ? 'Admin Panitia'
+          : found.role === 'juri'
+          ? 'Juri Lapangan'
+          : found.role === 'sekolah'
+          ? 'Perwakilan Sekolah'
+          : 'Tamu / Peninjau';
+
+        setLoginStepText(`Kredensial cocok! Menyiapkan sesi ${roleLabel}...`);
+
+        setTimeout(() => {
+          setIsLoggingIn(false);
+          setCurrentUser(found);
+          sessionStorage.setItem(AUTH_KEY, JSON.stringify(found));
+          showToast(`Selamat datang, ${found.name}!`);
+        }, 550);
+      } else {
+        setIsLoggingIn(false);
+        setLoginError(true);
+      }
+    }, 450);
   };
 
   const handleLogout = () => {
@@ -1167,6 +1202,7 @@ export default function App() {
   // School Self-Registration Handler
   const handleRegisterSchool = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isRegisteringSchool) return;
     setRegError('');
 
     if (!regSekolah.trim()) {
@@ -1192,67 +1228,72 @@ export default function App() {
       return;
     }
 
-    const newSchoolUser: AppUser = {
-      username: usernameLower,
-      password: regPassword,
-      name: `${regSekolah.trim()}`,
-      role: 'sekolah',
-      schoolName: regSekolah.trim(),
-      schoolLevel: regJenjang,
-      pembinaName: regPembina.trim(),
-      contactWa: regWa.trim(),
-      isCustom: true
-    };
+    setIsRegisteringSchool(true);
 
-    const updatedUsers = [...usersList, newSchoolUser];
-    setUsersList(updatedUsers);
-    try {
-      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(updatedUsers));
-    } catch {
-      // ignore
-    }
-    // Sync new school user to Cloud
-    saveUserToCloud(newSchoolUser);
-
-    // Auto-create or link a participant profile for this school
-    const schoolExists = pesertaList.some(
-      p => p.sekolah.toLowerCase().trim() === regSekolah.trim().toLowerCase()
-    );
-    if (!schoolExists) {
-      const nextNomor = String(pesertaList.length + 1).padStart(2, '0');
-      const newParticipant: Participant = {
-        id: `p-${Date.now()}`,
-        nomor: nextNomor,
-        peleton: `Peleton ${regSekolah.trim()}`,
-        jenjang: regJenjang,
-        sekolah: regSekolah.trim(),
-        tanggal: new Date().toISOString().split('T')[0],
-        juri: 'Belum Ditentukan',
-        scores: {
-          pbb: {}, variasi: {}, formasi: {}, danton: {},
-          devile: {}, gatur: {}, senam: {}, yelyel: {},
-          beladiri: {}, speaking: {}, tenda: {}
-        }
+    setTimeout(() => {
+      const newSchoolUser: AppUser = {
+        username: usernameLower,
+        password: regPassword,
+        name: `${regSekolah.trim()}`,
+        role: 'sekolah',
+        schoolName: regSekolah.trim(),
+        schoolLevel: regJenjang,
+        pembinaName: regPembina.trim(),
+        contactWa: regWa.trim(),
+        isCustom: true
       };
-      const updatedPeserta = [...pesertaList, newParticipant];
-      setPesertaList(updatedPeserta);
-      setActivePesertaId(newParticipant.id);
+
+      const updatedUsers = [...usersList, newSchoolUser];
+      setUsersList(updatedUsers);
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedPeserta, history: [] }));
+        localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(updatedUsers));
       } catch {
         // ignore
       }
-      // Sync initial participant to Cloud
-      saveParticipantToCloud(newParticipant);
-    }
+      // Sync new school user to Cloud
+      saveUserToCloud(newSchoolUser);
 
-    setCurrentUser(newSchoolUser);
-    try {
-      sessionStorage.setItem(AUTH_KEY, JSON.stringify(newSchoolUser));
-    } catch {
-      // ignore
-    }
-    showToast(`Registrasi Akun Sekolah ${regSekolah} berhasil! Selamat datang.`, 'success');
+      // Auto-create or link a participant profile for this school
+      const schoolExists = pesertaList.some(
+        p => p.sekolah.toLowerCase().trim() === regSekolah.trim().toLowerCase()
+      );
+      if (!schoolExists) {
+        const nextNomor = String(pesertaList.length + 1).padStart(2, '0');
+        const newParticipant: Participant = {
+          id: `p-${Date.now()}`,
+          nomor: nextNomor,
+          peleton: `Peleton ${regSekolah.trim()}`,
+          jenjang: regJenjang,
+          sekolah: regSekolah.trim(),
+          tanggal: new Date().toISOString().split('T')[0],
+          juri: 'Belum Ditentukan',
+          scores: {
+            pbb: {}, variasi: {}, formasi: {}, danton: {},
+            devile: {}, gatur: {}, senam: {}, yelyel: {},
+            beladiri: {}, speaking: {}, tenda: {}
+          }
+        };
+        const updatedPeserta = [...pesertaList, newParticipant];
+        setPesertaList(updatedPeserta);
+        setActivePesertaId(newParticipant.id);
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedPeserta, history: [] }));
+        } catch {
+          // ignore
+        }
+        // Sync initial participant to Cloud
+        saveParticipantToCloud(newParticipant);
+      }
+
+      setIsRegisteringSchool(false);
+      setCurrentUser(newSchoolUser);
+      try {
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(newSchoolUser));
+      } catch {
+        // ignore
+      }
+      showToast(`Registrasi Akun Sekolah ${regSekolah} berhasil! Selamat datang.`, 'success');
+    }, 600);
   };
 
   // Logo Handlers (Super Admin Only)
@@ -3100,7 +3141,49 @@ export default function App() {
             </div>
           </div>
 
-          {authViewTab === 'login' ? (
+          {isLoggingIn ? (
+            /* ANIMASI LOADING KETIKA MASUK LOGIN */
+            <div className="p-8 py-12 flex flex-col items-center justify-center text-center space-y-6 animate-in fade-in zoom-in-95 duration-200">
+              {/* Animated Avatar / Shield with Pulse Rings */}
+              <div className="relative">
+                <div className="w-20 h-20 rounded-2xl bg-blue-50 border-2 border-blue-500/30 flex items-center justify-center shadow-xl shadow-blue-500/10">
+                  {appLogo ? (
+                    <img src={appLogo} alt="Logo" className="w-12 h-12 object-contain" />
+                  ) : (
+                    <Shield className="w-10 h-10 text-blue-600" />
+                  )}
+                </div>
+                {/* Rotating Spinner Rings */}
+                <div className="absolute -inset-2.5 border-2 border-blue-600/20 border-t-blue-600 rounded-3xl animate-spin" />
+                <div className="absolute -inset-1 border border-indigo-500/30 rounded-2xl animate-ping opacity-25" />
+              </div>
+
+              {/* Text Information */}
+              <div className="space-y-2 max-w-xs">
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-xs font-bold">
+                  <span className="w-2 h-2 rounded-full bg-blue-600 animate-ping" />
+                  <span>Otentikasi Pengguna</span>
+                </div>
+                <h3 className="font-black text-slate-900 text-lg">
+                  Memproses Masuk ke Sistem
+                </h3>
+                <p className="text-xs text-slate-500 font-medium leading-relaxed">
+                  {loginStepText}
+                </p>
+              </div>
+
+              {/* Animated Glowing Progress Bar */}
+              <div className="w-56 h-2 bg-slate-100 rounded-full overflow-hidden p-0.5 border border-slate-200">
+                <div className="h-full bg-gradient-to-r from-blue-600 via-indigo-600 to-emerald-500 rounded-full animate-pulse w-full transition-all duration-500" />
+              </div>
+
+              {/* Status Note */}
+              <div className="flex items-center gap-2 text-[11px] text-slate-400 font-medium">
+                <Loader2 className="w-3.5 h-3.5 text-blue-600 animate-spin" />
+                <span>Menghubungkan sesi & database lomba...</span>
+              </div>
+            </div>
+          ) : authViewTab === 'login' ? (
             /* TAB 1: FORM LOGIN */
             <form onSubmit={handleLoginSubmit} className="p-6 space-y-4">
               {loginError && (
@@ -3117,10 +3200,11 @@ export default function App() {
                   <input
                     type="text"
                     required
+                    disabled={isLoggingIn}
                     value={loginUsername}
                     onChange={e => setLoginUsername(e.target.value)}
                     placeholder="Masukkan username"
-                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:bg-slate-50"
                   />
                 </div>
               </div>
@@ -3132,19 +3216,30 @@ export default function App() {
                   <input
                     type="password"
                     required
+                    disabled={isLoggingIn}
                     value={loginPassword}
                     onChange={e => setLoginPassword(e.target.value)}
                     placeholder="Masukkan password"
-                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:bg-slate-50"
                   />
                 </div>
               </div>
 
               <button
                 type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer"
+                disabled={isLoggingIn}
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-500 text-white font-bold py-2.5 rounded-lg text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
               >
-                <LogIn className="w-4 h-4" /> Masuk ke Aplikasi
+                {isLoggingIn ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    <span>{loginStepText}</span>
+                  </>
+                ) : (
+                  <>
+                    <LogIn className="w-4 h-4" /> Masuk ke Aplikasi
+                  </>
+                )}
               </button>
 
               <div className="text-center pt-1">
@@ -3298,9 +3393,19 @@ export default function App() {
 
               <button
                 type="submit"
-                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-lg text-xs sm:text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer mt-2"
+                disabled={isRegisteringSchool}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-75 disabled:cursor-not-allowed text-white font-bold py-2.5 rounded-lg text-xs sm:text-sm shadow-md transition flex items-center justify-center gap-2 cursor-pointer mt-2"
               >
-                <Building2 className="w-4 h-4" /> Daftarkan Akun Sekolah Sekarang
+                {isRegisteringSchool ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    <span>Mendaftarkan & Menyiapkan Akun Sekolah...</span>
+                  </>
+                ) : (
+                  <>
+                    <Building2 className="w-4 h-4" /> Daftarkan Akun Sekolah Sekarang
+                  </>
+                )}
               </button>
 
               <div className="text-center pt-2">
@@ -3325,7 +3430,7 @@ export default function App() {
   // ==========================================
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-100 text-slate-800">
+    <div className="min-h-screen flex flex-col bg-slate-100 text-slate-800 animate-in fade-in duration-300">
       {/* 1. TOP NAVBAR */}
       <header className="bg-slate-900 text-white shadow sticky top-0 z-40 no-print border-b border-slate-800">
         <div className="px-3 sm:px-6 py-2.5">
