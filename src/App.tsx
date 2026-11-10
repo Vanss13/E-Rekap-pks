@@ -58,17 +58,40 @@ import {
   Phone,
   Star,
   BarChart3,
-  PieChart
+  PieChart,
+  Cloud,
+  RefreshCw,
+  Power,
+  ShieldAlert
 } from 'lucide-react';
 import { RegistrationFormsView } from './components/RegistrationFormsView';
 import { LogoSettingModal } from './components/LogoSettingModal';
 import { SchoolAccountManagerModal } from './components/SchoolAccountManagerModal';
+import { CloudSyncModal } from './components/CloudSyncModal';
+import { AppStatusModal } from './components/AppStatusModal';
+import { AppMaintenanceView } from './components/AppMaintenanceView';
+import {
+  testConnection,
+  subscribeToParticipants,
+  saveParticipantToCloud,
+  deleteParticipantFromCloud,
+  subscribeToUsers,
+  saveUserToCloud,
+  deleteUserFromCloud,
+  subscribeToConfig,
+  saveConfigToCloud,
+  subscribeToLogo,
+  saveLogoToCloud,
+  subscribeToAppStatus,
+  saveAppStatusToCloud,
+  AppStatusConfig
+} from './lib/firebase';
 
 // ==========================================
 // TYPES & CRITERIA DEFINITIONS
 // ==========================================
 
-export type UserRole = 'admin' | 'juri' | 'user' | 'sekolah';
+export type UserRole = 'superadmin' | 'admin' | 'juri' | 'user' | 'sekolah';
 export type SchoolLevel = 'SLTP' | 'SLTA';
 
 export interface AppUser {
@@ -418,7 +441,9 @@ const DEFAULT_CATEGORIES: CategoryConfig[] = [
 
 // DEFAULT SYSTEM USERS
 const DEFAULT_SYSTEM_USERS: AppUser[] = [
-  { username: 'admin', password: 'admin123', name: 'Administrator Utama', role: 'admin', isCustom: false },
+  { username: 'admin', password: 'admin123', name: 'Administrator Utama (Super Admin)', role: 'superadmin', isCustom: false },
+  { username: 'administrator', password: 'administrator123', name: 'Administrator Utama (Super Admin)', role: 'superadmin', isCustom: false },
+  { username: 'panitia', password: 'panitia123', name: 'Admin Panitia (Akses Terbatas)', role: 'admin', isCustom: false },
   { username: 'juri1', password: 'juri123', name: 'Aiptu Budi Santoso (Juri Lapangan)', role: 'juri', isCustom: false },
   { username: 'user1', password: 'user123', name: 'Kontingen / Tamu Resmi', role: 'user', isCustom: false }
 ];
@@ -428,6 +453,19 @@ const CONFIG_STORAGE_KEY = 'PBB_PKS_CONFIG_V4_DATA';
 const USERS_STORAGE_KEY = 'PBB_PKS_USERS_V4_DATA';
 const AUTH_KEY = 'PBB_AUTH_CURRENT_USER';
 const LOGO_STORAGE_KEY = 'PBB_PKS_APP_CUSTOM_LOGO';
+const STATUS_STORAGE_KEY = 'PBB_PKS_APP_STATUS_V4';
+
+const DEFAULT_APP_STATUS: AppStatusConfig = {
+  id: 'app_status',
+  isActive: true,
+  title: 'Aplikasi Sedang Dinonaktifkan Sementara',
+  message:
+    'Sistem E-Rekapitulasi Lomba PBB & PKS sedang ditutup sementara oleh Panitia Pelaksana. Harap hubungi administrator untuk informasi lebih lanjut.',
+  estimateTime: '',
+  contactInfo: '',
+  updatedAt: new Date().toISOString(),
+  updatedBy: 'admin'
+};
 
 // CONTOH DATA AWAL PESERTA
 const INITIAL_PESERTA: Participant[] = [
@@ -550,8 +588,19 @@ export default function App() {
     try {
       const stored = localStorage.getItem(USERS_STORAGE_KEY);
       if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        const parsed: AppUser[] = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          if (!parsed.some(u => u.username.toLowerCase() === 'administrator')) {
+            parsed.push({
+              username: 'administrator',
+              password: 'administrator123',
+              name: 'Administrator Utama (Super Admin)',
+              role: 'superadmin',
+              isCustom: false
+            });
+          }
+          return parsed;
+        }
       }
     } catch {
       // fallback
@@ -567,6 +616,17 @@ export default function App() {
       return null;
     }
   });
+
+  // Role Access Hierarchy: Super Admin (Utama) vs Admin Panitia (Akses Terbatas) vs Juri vs Sekolah vs Tamu
+  const isSuperAdmin = Boolean(
+    currentUser &&
+      (currentUser.role === 'superadmin' ||
+        (currentUser.role === 'admin' &&
+          (currentUser.username.toLowerCase() === 'admin' ||
+            currentUser.username.toLowerCase() === 'administrator')))
+  );
+  const isAdminRole = Boolean(currentUser && (isSuperAdmin || currentUser.role === 'admin'));
+  const isUserRole = Boolean(currentUser && currentUser.role === 'user');
 
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -725,6 +785,21 @@ export default function App() {
   const [modalLogoOpen, setModalLogoOpen] = useState(false);
   const [tempLogoUrl, setTempLogoUrl] = useState('');
 
+  // App Operational Status State (Aktivasi / Nonaktifkan Aplikasi dengan Kustom Teks)
+  const [appStatus, setAppStatus] = useState<AppStatusConfig>(() => {
+    try {
+      const stored = localStorage.getItem(STATUS_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (typeof parsed.isActive === 'boolean') return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return DEFAULT_APP_STATUS;
+  });
+  const [modalStatusOpen, setModalStatusOpen] = useState(false);
+
   // School Self-Registration State (Layar Login)
   const [authViewTab, setAuthViewTab] = useState<'login' | 'register_sekolah'>('login');
   const [regJenjang, setRegJenjang] = useState<SchoolLevel>('SLTP');
@@ -838,7 +913,191 @@ export default function App() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Save Users Data
+  // Cloud Firestore Sync State
+  const [cloudStatus, setCloudStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
+  const [cloudLastSynced, setCloudLastSynced] = useState<Date | null>(null);
+  const [modalCloudInfoOpen, setModalCloudInfoOpen] = useState(false);
+  const isInitialCloudSyncDone = useRef(false);
+
+  // Real-time Cloud Listeners & Auto-Sync
+  useEffect(() => {
+    let unsubParticipants: (() => void) | undefined;
+    let unsubUsers: (() => void) | undefined;
+    let unsubConfig: (() => void) | undefined;
+    let unsubLogo: (() => void) | undefined;
+    let unsubStatus: (() => void) | undefined;
+
+    const initCloud = async () => {
+      try {
+        const isOk = await testConnection();
+        if (isOk) {
+          setCloudStatus('connected');
+          setCloudLastSynced(new Date());
+        } else {
+          setCloudStatus('offline');
+        }
+
+        // 1. Subscribe to Participants
+        unsubParticipants = subscribeToParticipants(
+          cloudPeserta => {
+            setCloudStatus('connected');
+            setCloudLastSynced(new Date());
+            if (cloudPeserta && cloudPeserta.length > 0) {
+              setPesertaList(cloudPeserta);
+              try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: cloudPeserta }));
+              } catch {
+                // ignore
+              }
+            } else if (!isInitialCloudSyncDone.current && pesertaList.length > 0) {
+              // Seed cloud if cloud is newly created & empty
+              pesertaList.forEach(p => saveParticipantToCloud(p));
+            }
+          },
+          err => {
+            console.error('Cloud participants sync error:', err);
+            setCloudStatus('error');
+          }
+        );
+
+        // 2. Subscribe to Users
+        unsubUsers = subscribeToUsers(
+          cloudUsers => {
+            setCloudStatus('connected');
+            setCloudLastSynced(new Date());
+            if (cloudUsers && cloudUsers.length > 0) {
+              const hasAdministrator = cloudUsers.some(u => u.username?.toLowerCase() === 'administrator');
+              if (!hasAdministrator) {
+                const adminAccount: AppUser = {
+                  username: 'administrator',
+                  password: 'administrator123',
+                  name: 'Administrator Utama (Super Admin)',
+                  role: 'superadmin',
+                  isCustom: false
+                };
+                saveUserToCloud(adminAccount);
+                cloudUsers = [...cloudUsers, adminAccount];
+              }
+              setUsersList(cloudUsers);
+              try {
+                localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(cloudUsers));
+              } catch {
+                // ignore
+              }
+            } else if (!isInitialCloudSyncDone.current && usersList.length > 0) {
+              // Seed cloud users
+              usersList.forEach(u => saveUserToCloud(u));
+            }
+          },
+          err => {
+            console.error('Cloud users sync error:', err);
+            setCloudStatus('error');
+          }
+        );
+
+        // 3. Subscribe to Config
+        unsubConfig = subscribeToConfig(
+          cloudConfig => {
+            if (cloudConfig && Array.isArray(cloudConfig) && cloudConfig.length > 0) {
+              setCategories(cloudConfig);
+              try {
+                localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(cloudConfig));
+              } catch {
+                // ignore
+              }
+            } else if (!isInitialCloudSyncDone.current && categories.length > 0) {
+              saveConfigToCloud(categories);
+            }
+          },
+          err => console.error('Cloud config sync error:', err)
+        );
+
+        // 4. Subscribe to Logo
+        unsubLogo = subscribeToLogo(
+          cloudLogo => {
+            if (cloudLogo) {
+              setAppLogo(cloudLogo);
+              try {
+                localStorage.setItem(LOGO_STORAGE_KEY, cloudLogo);
+              } catch {
+                // ignore
+              }
+            }
+          },
+          err => console.error('Cloud logo sync error:', err)
+        );
+
+        // 5. Subscribe to App Status (Aktif / Nonaktif dengan Kustom Teks)
+        unsubStatus = subscribeToAppStatus(
+          cloudStatusConfig => {
+            if (cloudStatusConfig) {
+              setAppStatus(cloudStatusConfig);
+              try {
+                localStorage.setItem(STATUS_STORAGE_KEY, JSON.stringify(cloudStatusConfig));
+              } catch {
+                // ignore
+              }
+            } else if (!isInitialCloudSyncDone.current) {
+              saveAppStatusToCloud(appStatus);
+            }
+          },
+          err => console.error('Cloud app status sync error:', err)
+        );
+
+        isInitialCloudSyncDone.current = true;
+      } catch (err) {
+        console.error('Cloud initialization failed:', err);
+        setCloudStatus('offline');
+      }
+    };
+
+    initCloud();
+
+    return () => {
+      if (unsubParticipants) unsubParticipants();
+      if (unsubUsers) unsubUsers();
+      if (unsubConfig) unsubConfig();
+      if (unsubLogo) unsubLogo();
+      if (unsubStatus) unsubStatus();
+    };
+  }, []);
+
+  // Manual Force Push to Cloud
+  const handleForceSyncAll = async () => {
+    setCloudStatus('connecting');
+    try {
+      for (const p of pesertaList) {
+        await saveParticipantToCloud(p);
+      }
+      for (const u of usersList) {
+        await saveUserToCloud(u);
+      }
+      await saveConfigToCloud(categories);
+      if (appLogo) {
+        await saveLogoToCloud(appLogo);
+      }
+      await saveAppStatusToCloud(appStatus);
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
+    } catch (e) {
+      console.error('Force sync error:', e);
+      setCloudStatus('error');
+      throw e;
+    }
+  };
+
+  // Save App Status to Cloud & Local
+  const handleSaveAppStatus = async (newStatus: AppStatusConfig) => {
+    setAppStatus(newStatus);
+    try {
+      localStorage.setItem(STATUS_STORAGE_KEY, JSON.stringify(newStatus));
+    } catch (e) {
+      console.error('Storage error', e);
+    }
+    await saveAppStatusToCloud(newStatus);
+  };
+
+  // Save Users Data (Local Backup)
   useEffect(() => {
     try {
       localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(usersList));
@@ -847,7 +1106,7 @@ export default function App() {
     }
   }, [usersList]);
 
-  // Save Participant Data
+  // Save Participant Data (Local Backup)
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList }));
@@ -856,7 +1115,7 @@ export default function App() {
     }
   }, [pesertaList]);
 
-  // Save Categories Config
+  // Save Categories Config (Local Backup)
   useEffect(() => {
     try {
       localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(categories));
@@ -896,16 +1155,6 @@ export default function App() {
       showToast(`Selamat datang, ${found.name}!`);
     } else {
       setLoginError(true);
-    }
-  };
-
-  const handleQuickLogin = (role: UserRole) => {
-    const found = usersList.find(u => u.role === role);
-    if (found) {
-      setLoginError(false);
-      setCurrentUser(found);
-      sessionStorage.setItem(AUTH_KEY, JSON.stringify(found));
-      showToast(`Masuk sebagai ${found.name}`);
     }
   };
 
@@ -962,6 +1211,8 @@ export default function App() {
     } catch {
       // ignore
     }
+    // Sync new school user to Cloud
+    saveUserToCloud(newSchoolUser);
 
     // Auto-create or link a participant profile for this school
     const schoolExists = pesertaList.some(
@@ -991,6 +1242,8 @@ export default function App() {
       } catch {
         // ignore
       }
+      // Sync initial participant to Cloud
+      saveParticipantToCloud(newParticipant);
     }
 
     setCurrentUser(newSchoolUser);
@@ -1002,8 +1255,12 @@ export default function App() {
     showToast(`Registrasi Akun Sekolah ${regSekolah} berhasil! Selamat datang.`, 'success');
   };
 
-  // Logo Handlers
+  // Logo Handlers (Super Admin Only)
   const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!isSuperAdmin) {
+      showToast('Hanya Administrator Utama yang berhak mengubah logo aplikasi!', 'error');
+      return;
+    }
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -1021,6 +1278,7 @@ export default function App() {
       } catch (err) {
         console.error('Storage error', err);
       }
+      saveLogoToCloud(dataUrl);
       showToast('Logo aplikasi berhasil diperbarui!', 'success');
       setModalLogoOpen(false);
     };
@@ -1028,17 +1286,26 @@ export default function App() {
   };
 
   const handleResetLogo = () => {
+    if (!isSuperAdmin) {
+      showToast('Hanya Administrator Utama yang berhak mereset logo!', 'error');
+      return;
+    }
     setAppLogo(null);
     try {
       localStorage.removeItem(LOGO_STORAGE_KEY);
     } catch {
       // ignore
     }
+    saveLogoToCloud(null);
     showToast('Logo dikembalikan ke lambang default PKS.', 'info');
     setModalLogoOpen(false);
   };
 
   const handleSaveLogoUrl = (customLogo?: string) => {
+    if (!isSuperAdmin) {
+      showToast('Hanya Administrator Utama yang berhak mengubah logo aplikasi!', 'error');
+      return;
+    }
     const logoToSave = customLogo || tempLogoUrl.trim();
     if (!logoToSave) return;
     setAppLogo(logoToSave);
@@ -1047,6 +1314,7 @@ export default function App() {
     } catch {
       // ignore
     }
+    saveLogoToCloud(logoToSave);
     showToast('Logo aplikasi berhasil diperbarui!', 'success');
     setTempLogoUrl('');
     setModalLogoOpen(false);
@@ -1205,6 +1473,11 @@ export default function App() {
 
   // User Management Handlers (Admin Only)
   const handleStartEditUser = (u: AppUser) => {
+    const isTargetSuper = u.role === 'superadmin' || u.username === 'admin' || u.username === 'administrator';
+    if (!isSuperAdmin && isTargetSuper) {
+      showToast('Admin terbatas tidak diizinkan mengubah akun Administrator Utama!', 'error');
+      return;
+    }
     setEditingUserOriginalUsername(u.username);
     setUserFormData({
       username: u.username,
@@ -1258,22 +1531,31 @@ export default function App() {
 
     const originalUser = usersList.find(u => u.username === editingUserOriginalUsername);
     const finalPassword = pwd || originalUser?.password || '123456';
+    const isTargetSuper = originalUser?.role === 'superadmin' || originalUser?.username === 'admin' || originalUser?.username === 'administrator';
+
+    let finalRole: UserRole = userFormData.role;
+    if (isTargetSuper) {
+      finalRole = originalUser?.role || 'superadmin';
+    } else if (!isSuperAdmin && userFormData.role === 'superadmin') {
+      finalRole = originalUser?.role || 'admin';
+    }
 
     const updatedUser: AppUser = {
       username: uname,
       password: finalPassword,
       name: dname,
-      role: editingUserOriginalUsername === 'admin' ? 'admin' : userFormData.role,
+      role: finalRole,
       isCustom: originalUser?.isCustom ?? true,
-      schoolName: userFormData.role === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : originalUser?.schoolName,
-      schoolLevel: userFormData.role === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : originalUser?.schoolLevel,
-      pembinaName: userFormData.role === 'sekolah' ? userFormData.pembinaName?.trim() : originalUser?.pembinaName,
-      contactWa: userFormData.role === 'sekolah' ? userFormData.contactWa?.trim() : originalUser?.contactWa
+      schoolName: finalRole === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : originalUser?.schoolName,
+      schoolLevel: finalRole === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : originalUser?.schoolLevel,
+      pembinaName: finalRole === 'sekolah' ? userFormData.pembinaName?.trim() : originalUser?.pembinaName,
+      contactWa: finalRole === 'sekolah' ? userFormData.contactWa?.trim() : originalUser?.contactWa
     };
 
     setUsersList(prev =>
       prev.map(u => (u.username === editingUserOriginalUsername ? updatedUser : u))
     );
+    saveUserToCloud(updatedUser);
 
     // Jika akun yang sedang login saat ini diubah, sinkronkan ke currentUser dan sessionStorage
     if (currentUser && currentUser.username === editingUserOriginalUsername) {
@@ -1312,19 +1594,22 @@ export default function App() {
       return;
     }
 
+    const requestedRole: UserRole = (!isSuperAdmin && userFormData.role === 'superadmin') ? 'admin' : userFormData.role;
+
     const newUser: AppUser = {
       username: uname,
       password: pwd,
       name: dname,
-      role: userFormData.role,
+      role: requestedRole,
       isCustom: true,
-      schoolName: userFormData.role === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : undefined,
-      schoolLevel: userFormData.role === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : undefined,
-      pembinaName: userFormData.role === 'sekolah' ? userFormData.pembinaName?.trim() : undefined,
-      contactWa: userFormData.role === 'sekolah' ? userFormData.contactWa?.trim() : undefined
+      schoolName: requestedRole === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : undefined,
+      schoolLevel: requestedRole === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : undefined,
+      pembinaName: requestedRole === 'sekolah' ? userFormData.pembinaName?.trim() : undefined,
+      contactWa: requestedRole === 'sekolah' ? userFormData.contactWa?.trim() : undefined
     };
 
     setUsersList(prev => [...prev, newUser]);
+    saveUserToCloud(newUser);
     setUserFormData({
       username: '',
       password: '',
@@ -1344,8 +1629,14 @@ export default function App() {
       showToast('Tidak dapat menghapus akun yang sedang Anda gunakan!', 'error');
       return;
     }
-    if (usernameToDelete === 'admin') {
+    const target = usersList.find(u => u.username === usernameToDelete);
+    const isTargetSuper = target ? (target.role === 'superadmin' || target.username === 'admin' || target.username === 'administrator') : (usernameToDelete === 'admin' || usernameToDelete === 'administrator');
+    if (isTargetSuper) {
       showToast('Akun Administrator Utama tidak dapat dihapus!', 'error');
+      return;
+    }
+    if (!isSuperAdmin && target && target.role === 'admin') {
+      showToast('Admin terbatas tidak memiliki wewenang menghapus akun admin lain!', 'error');
       return;
     }
 
@@ -1356,6 +1647,7 @@ export default function App() {
       confirmText: 'Hapus Pengguna',
       isDanger: true,
       onConfirm: () => {
+        deleteUserFromCloud(usernameToDelete);
         setUsersList(prev => prev.filter(u => u.username !== usernameToDelete));
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
         showToast('Akun pengguna berhasil dihapus.', 'info');
@@ -1512,7 +1804,7 @@ export default function App() {
           currentCatScores[criterionNo] = val;
         }
         const updatedJudge = currentUser.role === 'juri' ? currentUser.name : p.juri;
-        return {
+        const updatedP = {
           ...p,
           juri: updatedJudge,
           scores: {
@@ -1520,6 +1812,8 @@ export default function App() {
             [categoryKey]: currentCatScores
           }
         };
+        saveParticipantToCloud(updatedP);
+        return updatedP;
       })
     );
     showToast('Nilai tersimpan');
@@ -1545,7 +1839,9 @@ export default function App() {
             if (p.id !== activePeserta.id) return p;
             const updatedScores = { ...p.scores };
             updatedScores[catKey] = {};
-            return { ...p, scores: updatedScores };
+            const updatedP = { ...p, scores: updatedScores };
+            saveParticipantToCloud(updatedP);
+            return updatedP;
           })
         );
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
@@ -1677,7 +1973,7 @@ export default function App() {
           }
         };
 
-        return {
+        const updatedP = {
           ...p,
           juri: updatedJudge,
           scores: {
@@ -1686,6 +1982,8 @@ export default function App() {
           },
           formPhotos: updatedPhotos
         };
+        saveParticipantToCloud(updatedP);
+        return updatedP;
       })
     );
 
@@ -1756,21 +2054,26 @@ export default function App() {
     }
 
     if (editingPesertaId) {
+      const existing = pesertaList.find(p => p.id === editingPesertaId);
+      const updatedParticipant: Participant = {
+        ...(existing || ({} as Participant)),
+        id: editingPesertaId,
+        nomor: pesertaFormData.nomor.trim(),
+        peleton: pesertaFormData.peleton.trim(),
+        jenjang: pesertaFormData.jenjang,
+        sekolah: pesertaFormData.sekolah.trim(),
+        tanggal: pesertaFormData.tanggal,
+        juri: pesertaFormData.juri.trim(),
+        scores: existing?.scores || {
+          pbb: {}, variasi: {}, formasi: {}, danton: {},
+          devile: {}, gatur: {}, senam: {}, yelyel: {},
+          beladiri: {}, speaking: {}, tenda: {}
+        }
+      };
       setPesertaList(prev =>
-        prev.map(p =>
-          p.id === editingPesertaId
-            ? {
-                ...p,
-                nomor: pesertaFormData.nomor.trim(),
-                peleton: pesertaFormData.peleton.trim(),
-                jenjang: pesertaFormData.jenjang,
-                sekolah: pesertaFormData.sekolah.trim(),
-                tanggal: pesertaFormData.tanggal,
-                juri: pesertaFormData.juri.trim()
-              }
-            : p
-        )
+        prev.map(p => (p.id === editingPesertaId ? updatedParticipant : p))
       );
+      saveParticipantToCloud(updatedParticipant);
       showToast('Data peserta berhasil diperbarui.');
     } else {
       const newId = 'p-' + Date.now();
@@ -1798,13 +2101,14 @@ export default function App() {
       };
       setPesertaList(prev => [...prev, newParticipant]);
       setActivePesertaId(newId);
+      saveParticipantToCloud(newParticipant);
       showToast('Peserta baru berhasil ditambahkan.');
     }
     setModalPesertaOpen(false);
   };
 
   const handleDeletePeserta = (id: string) => {
-    if (!currentUser || currentUser.role !== 'admin') {
+    if (!currentUser || !isAdminRole) {
       showToast('Hanya Administrator yang berhak menghapus peserta!', 'error');
       return;
     }
@@ -1818,6 +2122,7 @@ export default function App() {
       confirmText: 'Hapus Peserta',
       isDanger: true,
       onConfirm: () => {
+        deleteParticipantFromCloud(id);
         setPesertaList(prev => {
           const filtered = prev.filter(p => p.id !== id);
           if (activePesertaId === id) {
@@ -1831,9 +2136,12 @@ export default function App() {
     });
   };
 
-  // Reset All System Data (Admin Only)
+  // Reset All System Data (Super Admin Only)
   const handleResetAllData = () => {
-    if (!currentUser || currentUser.role !== 'admin') return;
+    if (!isSuperAdmin) {
+      showToast('Hanya Administrator Utama (Super Admin) yang berhak mereset seluruh data sistem!', 'error');
+      return;
+    }
 
     setConfirmModal({
       isOpen: true,
@@ -1869,22 +2177,31 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    if (!isSuperAdmin) {
+      showToast('Hanya Administrator Utama (Super Admin) yang berhak memulihkan data sistem!', 'error');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = event => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (Array.isArray(parsed.pesertaList)) {
           setPesertaList(parsed.pesertaList);
+          parsed.pesertaList.forEach((p: Participant) => saveParticipantToCloud(p));
           if (Array.isArray(parsed.categories)) {
             setCategories(parsed.categories);
+            saveConfigToCloud(parsed.categories);
           }
           if (Array.isArray(parsed.usersList)) {
             setUsersList(parsed.usersList);
+            parsed.usersList.forEach((u: AppUser) => saveUserToCloud(u));
           }
           if (parsed.pesertaList.length > 0) {
             setActivePesertaId(parsed.pesertaList[0].id);
           }
-          showToast('Data cadangan berhasil dipulihkan!');
+          showToast('Data cadangan berhasil dipulihkan dan disinkronkan ke Cloud!');
         } else {
           showToast('Format file JSON tidak sesuai struktur aplikasi!', 'error');
         }
@@ -1896,16 +2213,27 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  // Administrator Configuration Save
+  // Administrator Configuration Save (Super Admin Only)
   const handleSaveCategoriesConfig = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isSuperAdmin) {
+      showToast('Hanya Administrator Utama yang berhak mengubah ketentuan juknis!', 'error');
+      return;
+    }
     setCategories(tempCategoriesConfig);
+    saveConfigToCloud(tempCategoriesConfig);
     setModalConfigOpen(false);
     showToast('Ketentuan nilai maksimal juknis berhasil diperbarui!');
   };
 
   const handleResetCategoriesToDefault = () => {
+    if (!isSuperAdmin) {
+      showToast('Hanya Administrator Utama yang berhak mengembalikan juknis standar!', 'error');
+      return;
+    }
     setTempCategoriesConfig(DEFAULT_CATEGORIES);
+    setCategories(DEFAULT_CATEGORIES);
+    saveConfigToCloud(DEFAULT_CATEGORIES);
     showToast('Konfigurasi dikembalikan ke standar awal.');
   };
 
@@ -2704,6 +3032,29 @@ export default function App() {
   }, [categories, rekapSelectedCategoryKey]);
 
   // ==========================================
+  // RENDER: APP MAINTENANCE / DEACTIVATED VIEW (IF APP IS DEACTIVATED & NOT SUPER ADMIN)
+  // ==========================================
+  if (!appStatus.isActive && !isSuperAdmin) {
+    return (
+      <AppMaintenanceView
+        appStatus={appStatus}
+        appLogo={appLogo}
+        usersList={usersList}
+        onAdminLoginSuccess={adminUser => {
+          setCurrentUser(adminUser);
+          try {
+            sessionStorage.setItem(AUTH_KEY, JSON.stringify(adminUser));
+          } catch {
+            // ignore
+          }
+          setModalStatusOpen(true);
+        }}
+        showToast={showToast}
+      />
+    );
+  }
+
+  // ==========================================
   // RENDER: LOGIN & REGISTRATION SCREEN (IF NOT LOGGED IN)
   // ==========================================
   if (!currentUser) {
@@ -2804,39 +3155,6 @@ export default function App() {
                 >
                   Belum punya akun? Daftarkan Sekolah Anda secara mandiri di sini →
                 </button>
-              </div>
-
-              {/* Quick Demo Login */}
-              <div className="pt-4 border-t border-slate-200 text-center">
-                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
-                  Pilihan Masuk Cepat (Akun Demo):
-                </span>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleQuickLogin('admin')}
-                    className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
-                  >
-                    <Shield className="w-4 h-4" />
-                    <span>Admin</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickLogin('juri')}
-                    className="bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
-                  >
-                    <UserCheck className="w-4 h-4" />
-                    <span>Juri</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickLogin('user')}
-                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 py-2 px-2 rounded-lg text-xs font-bold transition flex flex-col items-center gap-1 cursor-pointer"
-                  >
-                    <Eye className="w-4 h-4" />
-                    <span>User / Tamu</span>
-                  </button>
-                </div>
               </div>
             </form>
           ) : (
@@ -3005,8 +3323,6 @@ export default function App() {
   // ==========================================
   // RENDER: MAIN APPLICATION
   // ==========================================
-  const isUserRole = currentUser.role === 'user';
-  const isAdminRole = currentUser.role === 'admin';
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-100 text-slate-800">
@@ -3091,13 +3407,56 @@ export default function App() {
 
             {/* Right: User Profile & Actions */}
             <div className="flex items-center space-x-2">
+              {/* Cloud Real-Time Sync Indicator */}
+              <button
+                type="button"
+                onClick={() => setModalCloudInfoOpen(true)}
+                title="Status Sinkronisasi Cloud Firestore Multi-Perangkat"
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer shrink-0 ${
+                  cloudStatus === 'connected'
+                    ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/60'
+                    : cloudStatus === 'connecting'
+                    ? 'bg-amber-950/70 border-amber-500/40 text-amber-300 animate-pulse'
+                    : 'bg-rose-950/70 border-rose-500/40 text-rose-300'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full shrink-0 ${
+                  cloudStatus === 'connected' ? 'bg-emerald-400 animate-pulse' : cloudStatus === 'connecting' ? 'bg-amber-400' : 'bg-rose-400'
+                }`} />
+                <Cloud className="w-3.5 h-3.5 text-current shrink-0" />
+                <span className="hidden md:inline">
+                  {cloudStatus === 'connected' ? 'Cloud Aktif' : cloudStatus === 'connecting' ? 'Menghubungkan...' : 'Offline'}
+                </span>
+              </button>
+
+              {/* Admin App Status Toggle Button (Khusus Administrator Utama) */}
+              {isSuperAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setModalStatusOpen(true)}
+                  title="Kontrol Status Operasional Aplikasi (Aktivasi / Nonaktifkan)"
+                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer shrink-0 ${
+                    appStatus.isActive
+                      ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/60'
+                      : 'bg-rose-600 border-rose-500 text-white animate-pulse shadow-md'
+                  }`}
+                >
+                  <Power className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden sm:inline">
+                    {appStatus.isActive ? 'Aplikasi Aktif' : 'DINONAKTIFKAN'}
+                  </span>
+                </button>
+              )}
+
               <div className="hidden sm:flex items-center gap-2 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-full text-xs">
                 <User className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                 <div className="text-left">
                   <span className="font-bold text-white block leading-tight text-xs truncate max-w-[140px]">{currentUser.name}</span>
                   <span className="text-[9px] uppercase font-bold text-blue-300 tracking-wider">
-                    {currentUser.role === 'admin'
-                      ? 'ADMINISTRATOR'
+                    {isSuperAdmin
+                      ? 'ADMINISTRATOR UTAMA'
+                      : currentUser.role === 'admin'
+                      ? 'ADMIN PANITIA (TERBATAS)'
                       : currentUser.role === 'juri'
                       ? 'JURI LAPANGAN'
                       : currentUser.role === 'sekolah'
@@ -3129,6 +3488,34 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Prominent Admin Warning Strip when app is deactivated */}
+      {!appStatus.isActive && isSuperAdmin && (
+        <div className="bg-rose-600 text-white px-4 py-2.5 text-xs font-bold flex flex-wrap items-center justify-between gap-2 shadow-lg border-b border-rose-700 z-30 no-print">
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 shrink-0 text-amber-300 animate-bounce" />
+            <span>
+              <strong>PERINGATAN ADMINISTRATOR:</strong> Aplikasi saat ini sedang <u>DINONAKTIFKAN</u> untuk umum, juri, dan sekolah. Hanya Anda (Administrator) yang dapat mengakses sistem ini.
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => handleSaveAppStatus({ ...appStatus, isActive: true })}
+              className="bg-white text-rose-700 hover:bg-rose-50 px-3 py-1 rounded-lg text-[11px] font-black uppercase transition cursor-pointer shadow-xs"
+            >
+              Aktifkan Sekarang
+            </button>
+            <button
+              type="button"
+              onClick={() => setModalStatusOpen(true)}
+              className="bg-rose-700 hover:bg-rose-800 text-white px-3 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer border border-rose-400"
+            >
+              Atur Pesan Kustom
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 2. MAIN LAYOUT: SIDEBAR + CONTENT VIEWPORT */}
       <div className="flex-1 flex min-h-[calc(100vh-4rem)] relative">
@@ -3642,16 +4029,9 @@ export default function App() {
                 {!sidebarCollapsed && <span className="truncate">Format Blanko Juri Penilaian</span>}
               </button>
 
+              {/* Menu Operasional Admin (Dapat diakses Super Admin & Admin Panitia) */}
               {isAdminRole && (
                 <>
-                  <button
-                    onClick={() => setModalLogoOpen(true)}
-                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-amber-300 hover:text-amber-200 hover:bg-slate-800 transition cursor-pointer font-semibold"
-                  >
-                    <ImageIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    {!sidebarCollapsed && <span className="truncate">Ubah Logo Aplikasi</span>}
-                  </button>
-
                   <button
                     onClick={() => setModalSchoolAccountsOpen(true)}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-emerald-400 hover:text-emerald-300 hover:bg-slate-800 transition cursor-pointer font-bold"
@@ -3672,6 +4052,55 @@ export default function App() {
                   </button>
 
                   <button
+                    onClick={handleExportJson}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Cadangkan Data (JSON)</span>}
+                  </button>
+                </>
+              )}
+
+              {/* Menu Khusus Administrator Utama (Super Admin Master Controls) */}
+              {isSuperAdmin && (
+                <div className="pt-2 border-t border-slate-800/80 space-y-1">
+                  {!sidebarCollapsed && (
+                    <div className="px-2 pb-0.5 text-[9px] font-black uppercase text-amber-400/90 tracking-wider flex items-center gap-1">
+                      <Shield className="w-2.5 h-2.5 text-amber-400" />
+                      <span>Kontrol Master Administrator</span>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => setModalStatusOpen(true)}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                      appStatus.isActive
+                        ? 'text-emerald-400 hover:text-emerald-300 hover:bg-slate-800'
+                        : 'text-rose-400 bg-rose-950/40 hover:bg-rose-900/50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                      <Power className={`w-3.5 h-3.5 shrink-0 ${appStatus.isActive ? 'text-emerald-400' : 'text-rose-400 animate-pulse'}`} />
+                      {!sidebarCollapsed && <span className="truncate">Status Operasional Aplikasi</span>}
+                    </div>
+                    {!sidebarCollapsed && (
+                      <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded ${
+                        appStatus.isActive ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30' : 'bg-rose-600 text-white'
+                      }`}>
+                        {appStatus.isActive ? 'Aktif' : 'Nonaktif'}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => setModalLogoOpen(true)}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-amber-300 hover:text-amber-200 hover:bg-slate-800 transition cursor-pointer font-semibold"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Ubah Logo Aplikasi</span>}
+                  </button>
+
+                  <button
                     onClick={() => {
                       setTempCategoriesConfig([...categories]);
                       setModalConfigOpen(true);
@@ -3680,14 +4109,6 @@ export default function App() {
                   >
                     <Settings className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                     {!sidebarCollapsed && <span className="truncate">Atur Juknis Nilai Maksimal</span>}
-                  </button>
-
-                  <button
-                    onClick={handleExportJson}
-                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                    {!sidebarCollapsed && <span className="truncate">Cadangkan Data (JSON)</span>}
                   </button>
 
                   <label className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer font-medium">
@@ -3709,7 +4130,7 @@ export default function App() {
                     <RotateCcw className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                     {!sidebarCollapsed && <span className="truncate">Reset Semua Data</span>}
                   </button>
-                </>
+                </div>
               )}
             </div>
           </div>
@@ -3723,8 +4144,12 @@ export default function App() {
               {!sidebarCollapsed && (
                 <div className="min-w-0 truncate">
                   <div className="text-xs font-bold text-white truncate">{currentUser.name}</div>
-                  <div className="text-[10px] text-blue-400 uppercase font-semibold">
-                    {currentUser.role}
+                  <div className="text-[10px] uppercase font-semibold text-blue-400">
+                    {isSuperAdmin
+                      ? 'SUPER ADMIN'
+                      : currentUser.role === 'admin'
+                      ? 'ADMIN TERBATAS'
+                      : currentUser.role}
                   </div>
                 </div>
               )}
@@ -3814,8 +4239,10 @@ export default function App() {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="bg-blue-500/20 text-blue-300 border border-blue-400/30 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider inline-flex items-center gap-1.5">
                       <User className="w-3.5 h-3.5" />
-                      {currentUser.role === 'admin'
-                        ? 'Administrator Utama'
+                      {isSuperAdmin
+                        ? 'Administrator Utama (Super Admin)'
+                        : currentUser.role === 'admin'
+                        ? 'Admin Panitia (Akses Terbatas)'
                         : currentUser.role === 'juri'
                         ? 'Juri Lapangan'
                         : currentUser.role === 'sekolah'
@@ -5521,10 +5948,15 @@ export default function App() {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
             <div className="bg-slate-900 text-white px-5 py-4 flex justify-between items-center shrink-0">
-              <h3 className="font-bold text-base flex items-center gap-2">
-                <Users className="w-5 h-5 text-blue-400" />
-                Manajemen Pengguna & Akun Juri
-              </h3>
+              <div>
+                <h3 className="font-bold text-base flex items-center gap-2">
+                  <Users className="w-5 h-5 text-blue-400" />
+                  Manajemen Pengguna & Akun Juri
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Tingkat Akses Anda: <span className="font-bold text-amber-300">{isSuperAdmin ? 'Administrator Utama (Akses Penuh)' : 'Admin Panitia (Akses Terbatas)'}</span>
+                </p>
+              </div>
               <button
                 onClick={() => {
                   setModalUserOpen(false);
@@ -5590,7 +6022,7 @@ export default function App() {
             {userFormTab === 'add' && (
               <form onSubmit={handleSaveUser} className="p-5 space-y-4 overflow-y-auto flex-1">
                 <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3 text-xs text-blue-800">
-                  <strong>Tambah Akun Baru:</strong> Buat akun juri lapangan, administrator tambahan, atau akun tamu untuk kontingen sekolah.
+                  <strong>Tambah Akun Baru:</strong> Buat akun juri lapangan, admin panitia, atau akun tamu untuk kontingen sekolah.
                 </div>
 
                 <div>
@@ -5647,8 +6079,11 @@ export default function App() {
                     onChange={e => setUserFormData(prev => ({ ...prev, role: e.target.value as UserRole }))}
                     className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white font-semibold"
                   >
+                    {isSuperAdmin && (
+                      <option value="superadmin">Administrator Utama / Super Admin (Akses Penuh Tanpa Batas)</option>
+                    )}
+                    <option value="admin">Admin Panitia (Akses Terbatas: Kelola Peserta, Nilai & Akun Sekolah)</option>
                     <option value="juri">Juri Lapangan (Bisa Input, Upload Foto Form, & Perbarui Nilai Lomba)</option>
-                    <option value="admin">Administrator (Akses Penuh Kelola Data, User, Nilai & Ekspor)</option>
                     <option value="sekolah">Perwakilan Sekolah (Kelola Kontingen & Formulir Pendaftaran)</option>
                     <option value="user">User / Tamu / Peninjau (Hanya Lihat Nilai Mentah & Cetak)</option>
                   </select>
@@ -5741,13 +6176,13 @@ export default function App() {
                   <input
                     type="text"
                     required
-                    disabled={editingUserOriginalUsername === 'admin'}
+                    disabled={editingUserOriginalUsername === 'admin' || editingUserOriginalUsername === 'administrator'}
                     placeholder="Username"
                     value={userFormData.username}
                     onChange={e => setUserFormData(prev => ({ ...prev, username: e.target.value.toLowerCase().replace(/\s+/g, '') }))}
                     className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 outline-none disabled:bg-slate-100 disabled:text-slate-500"
                   />
-                  {editingUserOriginalUsername === 'admin' ? (
+                  {editingUserOriginalUsername === 'admin' || editingUserOriginalUsername === 'administrator' ? (
                     <p className="text-[11px] text-slate-400 mt-1">Username akun Administrator Utama dikunci oleh sistem.</p>
                   ) : (
                     <p className="text-[11px] text-slate-400 mt-1">Jika username diubah, login berikutnya wajib memakai username baru.</p>
@@ -5795,17 +6230,23 @@ export default function App() {
                   </label>
                   <select
                     value={userFormData.role}
-                    disabled={editingUserOriginalUsername === 'admin'}
+                    disabled={editingUserOriginalUsername === 'admin' || editingUserOriginalUsername === 'administrator' || (!isSuperAdmin && userFormData.role === 'superadmin')}
                     onChange={e => setUserFormData(prev => ({ ...prev, role: e.target.value as UserRole }))}
                     className="w-full border border-slate-300 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 outline-none bg-white font-semibold disabled:bg-slate-100 disabled:text-slate-500"
                   >
+                    {isSuperAdmin && (
+                      <option value="superadmin">Administrator Utama / Super Admin (Akses Penuh Tanpa Batas)</option>
+                    )}
+                    <option value="admin">Admin Panitia (Akses Terbatas: Kelola Peserta, Nilai & Akun Sekolah)</option>
                     <option value="juri">Juri Lapangan (Bisa Input, Upload Foto Form, & Perbarui Nilai Lomba)</option>
-                    <option value="admin">Administrator (Akses Penuh Kelola Data, User, Nilai & Ekspor)</option>
                     <option value="sekolah">Perwakilan Sekolah (Kelola Kontingen & Formulir Pendaftaran)</option>
                     <option value="user">User / Tamu / Peninjau (Hanya Lihat Nilai Mentah & Cetak)</option>
                   </select>
-                  {editingUserOriginalUsername === 'admin' && (
+                  {(editingUserOriginalUsername === 'admin' || editingUserOriginalUsername === 'administrator') && (
                     <p className="text-[11px] text-slate-400 mt-1">Hak akses Administrator Utama tidak dapat diturunkan.</p>
+                  )}
+                  {!isSuperAdmin && (
+                    <p className="text-[11px] text-amber-700 mt-1">Hanya Administrator Utama yang dapat memberikan atau mengubah role Super Admin.</p>
                   )}
                 </div>
 
@@ -5879,9 +6320,14 @@ export default function App() {
             {/* TAB 3: DAFTAR PENGGUNA TERDAFTAR */}
             {userFormTab === 'list' && (
               <div className="p-5 overflow-y-auto flex-1 space-y-4">
-                <div className="flex justify-between items-center text-xs text-slate-500">
-                  <span>Daftar akun yang dapat login ke sistem lomba:</span>
-                  <span className="font-semibold text-slate-700">Total {usersList.length} Pengguna</span>
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-600 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <span className="font-bold text-slate-800">Hierarki Hak Akses:</span>
+                    <span className="ml-1 text-slate-600">
+                      <strong>Super Admin</strong> (semua kontrol & darurat), <strong>Admin Panitia</strong> (peserta, nilai & sekolah), <strong>Juri</strong> (input nilai), <strong>Sekolah</strong> (biodata peserta & form).
+                    </span>
+                  </div>
+                  <span className="font-semibold text-slate-700 shrink-0">Total {usersList.length} Pengguna</span>
                 </div>
 
                 <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
@@ -5891,69 +6337,90 @@ export default function App() {
                         <th className="p-3">Username</th>
                         <th className="p-3">Password</th>
                         <th className="p-3">Nama Lengkap</th>
-                        <th className="p-3 text-center">Peran</th>
+                        <th className="p-3 text-center">Peran Akses</th>
                         <th className="p-3 text-center">Aksi</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200 font-medium">
-                      {usersList.map(u => (
-                        <tr key={u.username} className="hover:bg-slate-50 transition">
-                          <td className="p-3 font-bold text-slate-900">
-                            <div className="flex items-center gap-1.5">
-                              <span>{u.username}</span>
-                              {currentUser?.username === u.username && (
-                                <span className="text-[9px] bg-blue-100 text-blue-800 font-extrabold px-1.5 py-0.2 rounded">
-                                  Anda
+                      {usersList.map(u => {
+                        const isUserSuperAdmin = u.role === 'superadmin' || u.username === 'admin' || u.username === 'administrator';
+                        return (
+                          <tr key={u.username} className="hover:bg-slate-50 transition">
+                            <td className="p-3 font-bold text-slate-900">
+                              <div className="flex items-center gap-1.5">
+                                <span>{u.username}</span>
+                                {currentUser?.username === u.username && (
+                                  <span className="text-[9px] bg-blue-100 text-blue-800 font-extrabold px-1.5 py-0.2 rounded">
+                                    Anda
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="p-3">
+                              <span className="font-mono bg-slate-100 text-slate-800 px-2 py-0.5 rounded text-[11px] font-bold border border-slate-200">
+                                {u.password || '••••••'}
+                              </span>
+                            </td>
+                            <td className="p-3 text-slate-700">{u.name}</td>
+                            <td className="p-3 text-center">
+                              {isUserSuperAdmin ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-purple-100 text-purple-900 border border-purple-300">
+                                  SUPER ADMIN
+                                </span>
+                              ) : u.role === 'admin' ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-blue-100 text-blue-900 border border-blue-300">
+                                  ADMIN TERBATAS
+                                </span>
+                              ) : u.role === 'juri' ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-100 text-amber-900 border border-amber-300">
+                                  JURI LAPANGAN
+                                </span>
+                              ) : u.role === 'sekolah' ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-100 text-emerald-900 border border-emerald-300">
+                                  SEKOLAH
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-slate-100 text-slate-800 border border-slate-300">
+                                  TAMU
                                 </span>
                               )}
-                            </div>
-                          </td>
-                          <td className="p-3">
-                            <span className="font-mono bg-slate-100 text-slate-800 px-2 py-0.5 rounded text-[11px] font-bold border border-slate-200">
-                              {u.password || '••••••'}
-                            </span>
-                          </td>
-                          <td className="p-3 text-slate-700">{u.name}</td>
-                          <td className="p-3 text-center">
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
-                              u.role === 'admin'
-                                ? 'bg-rose-100 text-rose-800'
-                                : u.role === 'juri'
-                                ? 'bg-blue-100 text-blue-800'
-                                : u.role === 'sekolah'
-                                ? 'bg-purple-100 text-purple-800'
-                                : 'bg-emerald-100 text-emerald-800'
-                            }`}>
-                              {u.role === 'sekolah' ? 'SEKOLAH' : u.role}
-                            </span>
-                          </td>
-                          <td className="p-3 text-center">
-                            <div className="flex items-center justify-center gap-1">
-                              {/* Tombol Edit User & Password */}
-                              <button
-                                onClick={() => handleStartEditUser(u)}
-                                title="Edit Data Pengguna & Ubah Password"
-                                className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg cursor-pointer transition"
-                              >
-                                <Edit className="w-4 h-4" />
-                              </button>
+                            </td>
+                            <td className="p-3 text-center">
+                              <div className="flex items-center justify-center gap-1">
+                                {/* Tombol Edit User & Password */}
+                                {!isSuperAdmin && isUserSuperAdmin ? (
+                                  <span className="text-[10px] text-slate-400 italic px-1 font-semibold flex items-center gap-0.5">
+                                    <Lock className="w-3 h-3 text-slate-400" /> Terkunci
+                                  </span>
+                                ) : (
+                                  <button
+                                    onClick={() => handleStartEditUser(u)}
+                                    title="Edit Data Pengguna & Ubah Password"
+                                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg cursor-pointer transition"
+                                  >
+                                    <Edit className="w-4 h-4" />
+                                  </button>
+                                )}
 
-                              {/* Tombol Hapus User */}
-                              {u.username !== 'admin' && currentUser?.username !== u.username ? (
-                                <button
-                                  onClick={() => handleDeleteUser(u.username)}
-                                  title="Hapus Akun Pengguna"
-                                  className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer transition"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              ) : (
-                                <span className="text-[10px] text-slate-400 italic px-1">Kunci</span>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
+                                {/* Tombol Hapus User */}
+                                {!isUserSuperAdmin && currentUser?.username !== u.username ? (
+                                  (!isSuperAdmin && u.role === 'admin') ? null : (
+                                    <button
+                                      onClick={() => handleDeleteUser(u.username)}
+                                      title="Hapus Akun Pengguna"
+                                      className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer transition"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  )
+                                ) : isUserSuperAdmin && currentUser?.username !== u.username ? (
+                                  <span className="text-[10px] text-slate-400 italic px-1">Kunci</span>
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -7356,6 +7823,32 @@ export default function App() {
         currentUser={currentUser}
         setCurrentUser={setCurrentUser}
         showToast={showToast}
+      />
+
+      {/* ==================================================== */}
+      {/* MODAL: INFORMASI & SINKRONISASI CLOUD FIRESTORE */}
+      {/* ==================================================== */}
+      <CloudSyncModal
+        isOpen={modalCloudInfoOpen}
+        onClose={() => setModalCloudInfoOpen(false)}
+        cloudStatus={cloudStatus}
+        lastSynced={cloudLastSynced}
+        pesertaCount={pesertaList.length}
+        usersCount={usersList.length}
+        onForceSyncAll={handleForceSyncAll}
+        showToast={showToast}
+      />
+
+      {/* ==================================================== */}
+      {/* MODAL: KONTROL STATUS APLIKASI (AKTIVASI / NONAKTIF) */}
+      {/* ==================================================== */}
+      <AppStatusModal
+        isOpen={modalStatusOpen}
+        onClose={() => setModalStatusOpen(false)}
+        currentStatus={appStatus}
+        onSaveStatus={handleSaveAppStatus}
+        showToast={showToast}
+        appLogo={appLogo}
       />
 
       {/* ==================================================== */}

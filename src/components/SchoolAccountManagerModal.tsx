@@ -20,6 +20,11 @@ import {
   Plus
 } from 'lucide-react';
 import { AppUser, Participant, SchoolLevel } from '../App';
+import {
+  saveUserToCloud,
+  deleteUserFromCloud,
+  saveParticipantToCloud
+} from '../lib/firebase';
 
 interface SchoolAccountManagerModalProps {
   isOpen: boolean;
@@ -187,10 +192,12 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
     const updatedUsers = [...usersList, newSchoolUser];
     setUsersList(updatedUsers);
     try {
-      localStorage.setItem('PBB_PKS_APP_USERS_V2', JSON.stringify(updatedUsers));
+      localStorage.setItem('PBB_PKS_USERS_V4_DATA', JSON.stringify(updatedUsers));
     } catch {
       // ignore
     }
+    // Sync to Cloud Firestore
+    saveUserToCloud(newSchoolUser);
 
     // Auto-create initial participant profile for this school if requested and doesn't exist yet
     if (formData.autoCreatePeserta) {
@@ -216,10 +223,12 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
         const updatedPeserta = [...pesertaList, newPeserta];
         setPesertaList(updatedPeserta);
         try {
-          localStorage.setItem('PBB_PKS_APP_DATA_STORAGE_V1', JSON.stringify({ pesertaList: updatedPeserta, history: [] }));
+          localStorage.setItem('PBB_PKS_REKAP_APP_V4_DATA', JSON.stringify({ pesertaList: updatedPeserta, history: [] }));
         } catch {
           // ignore
         }
+        // Sync participant to Cloud Firestore
+        saveParticipantToCloud(newPeserta);
       }
     }
 
@@ -276,10 +285,12 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
     );
     setUsersList(updatedUsers);
     try {
-      localStorage.setItem('PBB_PKS_APP_USERS_V2', JSON.stringify(updatedUsers));
+      localStorage.setItem('PBB_PKS_USERS_V4_DATA', JSON.stringify(updatedUsers));
     } catch {
       // ignore
     }
+    // Sync update to Cloud Firestore
+    saveUserToCloud(updatedUser);
 
     // If currently logged in as this school user, sync
     if (currentUser && currentUser.username === editingTargetUsername) {
@@ -309,10 +320,12 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
       const updatedUsers = usersList.filter(u => u.username !== user.username);
       setUsersList(updatedUsers);
       try {
-        localStorage.setItem('PBB_PKS_APP_USERS_V2', JSON.stringify(updatedUsers));
+        localStorage.setItem('PBB_PKS_USERS_V4_DATA', JSON.stringify(updatedUsers));
       } catch {
         // ignore
       }
+      // Sync delete to Cloud Firestore
+      deleteUserFromCloud(user.username);
       showToast(`Akun sekolah "${school}" berhasil dihapus.`, 'info');
     }
   };
