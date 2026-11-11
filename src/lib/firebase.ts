@@ -1,6 +1,7 @@
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import {
+  initializeFirestore,
   getFirestore,
   doc,
   getDoc,
@@ -15,8 +16,17 @@ import firebaseConfig from '../../firebase-applet-config.json';
 // Initialize Firebase App
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// CRITICAL: Must pass firebaseConfig.firestoreDatabaseId as required by the platform
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// CRITICAL: Initialize Firestore with ignoreUndefinedProperties to prevent crashes on optional/undefined fields
+let dbInstance;
+try {
+  dbInstance = initializeFirestore(app, {
+    ignoreUndefinedProperties: true
+  }, firebaseConfig.firestoreDatabaseId);
+} catch {
+  dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+}
+
+export const db = dbInstance;
 export const auth = getAuth(app);
 
 // Error Handling Enums and Types
@@ -50,7 +60,7 @@ export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null
-) {
+): FirestoreErrorInfo {
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -70,6 +80,31 @@ export function handleFirestoreError(
   };
   console.error('Firestore Error:', JSON.stringify(errInfo));
   return errInfo;
+}
+
+/**
+ * Recursively removes undefined fields and cleans plain JS objects
+ * so Firestore never encounters unsupported undefined values.
+ */
+export function sanitizeForFirestore<T = any>(val: T): T {
+  if (val === undefined) {
+    return null as any;
+  }
+  if (val === null || typeof val !== 'object') {
+    return val;
+  }
+  if (Array.isArray(val)) {
+    return val
+      .filter(item => item !== undefined)
+      .map(item => sanitizeForFirestore(item)) as any;
+  }
+  const clean: Record<string, any> = {};
+  for (const [k, v] of Object.entries(val)) {
+    if (v !== undefined) {
+      clean[k] = sanitizeForFirestore(v);
+    }
+  }
+  return clean as T;
 }
 
 // Connection test
@@ -111,25 +146,32 @@ export function subscribeToParticipants(
   );
 }
 
-export async function saveParticipantToCloud(participant: any) {
+export async function saveParticipantToCloud(participant: any): Promise<{ success: boolean; error?: string }> {
+  if (!participant || !participant.id) {
+    return { success: false, error: 'ID peserta tidak valid' };
+  }
   const path = `participants/${participant.id}`;
   try {
-    const cleanDoc = {
+    const cleanDoc = sanitizeForFirestore({
       ...participant,
       updatedAt: new Date().toISOString()
-    };
+    });
     await setDoc(doc(db, 'participants', participant.id), cleanDoc);
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
+    return { success: false, error: errInfo.error };
   }
 }
 
-export async function deleteParticipantFromCloud(participantId: string) {
+export async function deleteParticipantFromCloud(participantId: string): Promise<{ success: boolean; error?: string }> {
   const path = `participants/${participantId}`;
   try {
     await deleteDoc(doc(db, 'participants', participantId));
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    const errInfo = handleFirestoreError(error, OperationType.DELETE, path);
+    return { success: false, error: errInfo.error };
   }
 }
 
@@ -155,25 +197,35 @@ export function subscribeToUsers(
   );
 }
 
-export async function saveUserToCloud(user: any) {
-  const path = `users/${user.username}`;
+export async function saveUserToCloud(user: any): Promise<{ success: boolean; error?: string }> {
+  if (!user || !user.username) {
+    return { success: false, error: 'Username tidak valid' };
+  }
+  const cleanUsername = String(user.username).trim().toLowerCase().replace(/\s+/g, '');
+  const path = `users/${cleanUsername}`;
   try {
-    const cleanDoc = {
+    const cleanDoc = sanitizeForFirestore({
       ...user,
+      username: cleanUsername,
       updatedAt: new Date().toISOString()
-    };
-    await setDoc(doc(db, 'users', user.username), cleanDoc);
+    });
+    await setDoc(doc(db, 'users', cleanUsername), cleanDoc);
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
+    return { success: false, error: errInfo.error };
   }
 }
 
-export async function deleteUserFromCloud(username: string) {
-  const path = `users/${username}`;
+export async function deleteUserFromCloud(username: string): Promise<{ success: boolean; error?: string }> {
+  const cleanUsername = String(username).trim().toLowerCase().replace(/\s+/g, '');
+  const path = `users/${cleanUsername}`;
   try {
-    await deleteDoc(doc(db, 'users', username));
+    await deleteDoc(doc(db, 'users', cleanUsername));
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    const errInfo = handleFirestoreError(error, OperationType.DELETE, path);
+    return { success: false, error: errInfo.error };
   }
 }
 
@@ -197,16 +249,19 @@ export function subscribeToConfig(
   );
 }
 
-export async function saveConfigToCloud(categories: any) {
+export async function saveConfigToCloud(categories: any): Promise<{ success: boolean; error?: string }> {
   const path = 'config/criteria_config';
   try {
-    await setDoc(doc(db, 'config', 'criteria_config'), {
+    const cleanDoc = sanitizeForFirestore({
       id: 'criteria_config',
       categories,
       updatedAt: new Date().toISOString()
     });
+    await setDoc(doc(db, 'config', 'criteria_config'), cleanDoc);
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
+    return { success: false, error: errInfo.error };
   }
 }
 
@@ -230,16 +285,19 @@ export function subscribeToLogo(
   );
 }
 
-export async function saveLogoToCloud(logoUrl: string | null) {
+export async function saveLogoToCloud(logoUrl: string | null): Promise<{ success: boolean; error?: string }> {
   const path = 'settings/global_logo';
   try {
-    await setDoc(doc(db, 'settings', 'global_logo'), {
+    const cleanDoc = sanitizeForFirestore({
       id: 'global_logo',
       logoUrl: logoUrl || '',
       updatedAt: new Date().toISOString()
     });
+    await setDoc(doc(db, 'settings', 'global_logo'), cleanDoc);
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
+    return { success: false, error: errInfo.error };
   }
 }
 
@@ -265,25 +323,32 @@ export function subscribeToRegistrations(
   );
 }
 
-export async function saveRegistrationToCloud(submission: any) {
+export async function saveRegistrationToCloud(submission: any): Promise<{ success: boolean; error?: string }> {
+  if (!submission || !submission.id) {
+    return { success: false, error: 'ID formulir tidak valid' };
+  }
   const path = `registrations/${submission.id}`;
   try {
-    const cleanDoc = {
+    const cleanDoc = sanitizeForFirestore({
       ...submission,
       updatedAt: new Date().toISOString()
-    };
+    });
     await setDoc(doc(db, 'registrations', submission.id), cleanDoc);
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
+    return { success: false, error: errInfo.error };
   }
 }
 
-export async function deleteRegistrationFromCloud(submissionId: string) {
+export async function deleteRegistrationFromCloud(submissionId: string): Promise<{ success: boolean; error?: string }> {
   const path = `registrations/${submissionId}`;
   try {
     await deleteDoc(doc(db, 'registrations', submissionId));
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    const errInfo = handleFirestoreError(error, OperationType.DELETE, path);
+    return { success: false, error: errInfo.error };
   }
 }
 
@@ -330,10 +395,10 @@ export function subscribeToAppStatus(
   );
 }
 
-export async function saveAppStatusToCloud(status: AppStatusConfig) {
+export async function saveAppStatusToCloud(status: AppStatusConfig): Promise<{ success: boolean; error?: string }> {
   const path = 'settings/app_status';
   try {
-    await setDoc(doc(db, 'settings', 'app_status'), {
+    const cleanDoc = sanitizeForFirestore({
       id: 'app_status',
       isActive: status.isActive,
       title: status.title,
@@ -343,8 +408,10 @@ export async function saveAppStatusToCloud(status: AppStatusConfig) {
       updatedAt: new Date().toISOString(),
       updatedBy: status.updatedBy || 'admin'
     });
+    await setDoc(doc(db, 'settings', 'app_status'), cleanDoc);
+    return { success: true };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
+    return { success: false, error: errInfo.error };
   }
 }
-

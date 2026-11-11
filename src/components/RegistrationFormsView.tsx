@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   FileText,
   Printer,
@@ -11,8 +11,11 @@ import {
   Star,
   Building2,
   Calendar,
-  CheckCircle2
+  CheckCircle2,
+  Cloud,
+  Loader2
 } from 'lucide-react';
+import { saveRegistrationToCloud } from '../lib/firebase';
 
 export type SchoolLevel = 'SLTP' | 'SLTA';
 
@@ -120,6 +123,68 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
 }) => {
   const handlePrint = () => {
     window.print();
+  };
+
+  const [isSavingCloud, setIsSavingCloud] = useState(false);
+
+  const handleSaveFormToCloud = async () => {
+    setIsSavingCloud(true);
+    try {
+      let formId = '';
+      let formTitle = '';
+      let payload: any = null;
+
+      if (currentTab === 'form_polisi_pelajar') {
+        formTitle = 'Polisi Pelajar (Poljar)';
+        formId = `poljar-${formPolisiPelajar.nisn || Date.now()}`;
+        payload = {
+          id: formId,
+          type: 'polisi_pelajar',
+          title: formTitle,
+          ...formPolisiPelajar
+        };
+      } else if (currentTab === 'form_calon_pks') {
+        formTitle = 'Calon Anggota PKS';
+        formId = `calonpks-${formCalonPks.nisn || Date.now()}`;
+        payload = {
+          id: formId,
+          type: 'calon_pks',
+          title: formTitle,
+          ...formCalonPks
+        };
+      } else if (currentTab === 'form_perkemahan_balok1') {
+        formTitle = 'Kemah PKS Balok 1';
+        formId = `balok1-${Date.now()}`;
+        payload = {
+          id: formId,
+          type: 'balok1',
+          title: formTitle,
+          ...formBalok1
+        };
+      } else if (currentTab === 'form_perkemahan_balok2') {
+        formTitle = 'Ujian PKS Balok 2';
+        formId = `balok2-${Date.now()}`;
+        payload = {
+          id: formId,
+          type: 'balok2',
+          title: formTitle,
+          ...formBalok2
+        };
+      }
+
+      if (payload) {
+        const res = await saveRegistrationToCloud(payload);
+        if (res.success) {
+          showToast(`Formulir "${formTitle}" berhasil disimpan & tersinkron otomatis ke Cloud!`, 'success');
+        } else {
+          showToast(`Gagal sinkron Cloud: ${res.error || 'Cek koneksi internet'}`, 'error');
+        }
+      }
+    } catch (e: any) {
+      showToast(`Terjadi kesalahan: ${e.message}`, 'error');
+    } finally {
+      setIsSavingCloud(false);
+    }
   };
 
   // 1. Reset or Fill Demo Data Handlers
@@ -418,6 +483,27 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Kosongkan</span> (Blanko)
+          </button>
+
+          {/* Save to Cloud Button */}
+          <button
+            type="button"
+            disabled={isSavingCloud}
+            onClick={handleSaveFormToCloud}
+            className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-75 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+            title="Simpan data formulir ini langsung ke database Cloud Firestore"
+          >
+            {isSavingCloud ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Menyimpan...</span>
+              </>
+            ) : (
+              <>
+                <Cloud className="w-3.5 h-3.5 text-blue-200" />
+                <span>Simpan ke Cloud</span>
+              </>
+            )}
           </button>
 
           {/* Excel Export Button */}

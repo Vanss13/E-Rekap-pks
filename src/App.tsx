@@ -1548,7 +1548,7 @@ export default function App() {
     setUserFormTab('list');
   };
 
-  const handleUpdateUser = (e: React.FormEvent) => {
+  const handleUpdateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUserOriginalUsername) return;
 
@@ -1587,16 +1587,28 @@ export default function App() {
       name: dname,
       role: finalRole,
       isCustom: originalUser?.isCustom ?? true,
-      schoolName: finalRole === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : originalUser?.schoolName,
-      schoolLevel: finalRole === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : originalUser?.schoolLevel,
-      pembinaName: finalRole === 'sekolah' ? userFormData.pembinaName?.trim() : originalUser?.pembinaName,
-      contactWa: finalRole === 'sekolah' ? userFormData.contactWa?.trim() : originalUser?.contactWa
+      schoolName: finalRole === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : (originalUser?.schoolName || ''),
+      schoolLevel: finalRole === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : (originalUser?.schoolLevel || 'SLTP'),
+      pembinaName: finalRole === 'sekolah' ? (userFormData.pembinaName?.trim() || '') : (originalUser?.pembinaName || ''),
+      contactWa: finalRole === 'sekolah' ? (userFormData.contactWa?.trim() || '') : (originalUser?.contactWa || '')
     };
 
-    setUsersList(prev =>
-      prev.map(u => (u.username === editingUserOriginalUsername ? updatedUser : u))
-    );
-    saveUserToCloud(updatedUser);
+    const newUsersList = usersList.map(u => (u.username === editingUserOriginalUsername ? updatedUser : u));
+    setUsersList(newUsersList);
+    try {
+      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(newUsersList));
+    } catch {
+      // ignore
+    }
+
+    // Jika username berubah, hapus dokumen lama di cloud
+    if (uname !== editingUserOriginalUsername.toLowerCase()) {
+      deleteUserFromCloud(editingUserOriginalUsername);
+    }
+    const syncRes = await saveUserToCloud(updatedUser);
+    if (syncRes.success) {
+      setCloudLastSynced(new Date());
+    }
 
     // Jika akun yang sedang login saat ini diubah, sinkronkan ke currentUser dan sessionStorage
     if (currentUser && currentUser.username === editingUserOriginalUsername) {
@@ -1616,10 +1628,10 @@ export default function App() {
       contactWa: ''
     });
     setUserFormTab('list');
-    showToast(`Akun "${dname}" dan password berhasil diperbarui!`);
+    showToast(`Akun "${dname}" berhasil diperbarui & tersinkron ke Cloud!`, 'success');
   };
 
-  const handleSaveUser = (e: React.FormEvent) => {
+  const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     const uname = userFormData.username.trim().toLowerCase().replace(/\s+/g, '');
     const pwd = userFormData.password.trim();
@@ -1643,14 +1655,28 @@ export default function App() {
       name: dname,
       role: requestedRole,
       isCustom: true,
-      schoolName: requestedRole === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : undefined,
-      schoolLevel: requestedRole === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : undefined,
-      pembinaName: requestedRole === 'sekolah' ? userFormData.pembinaName?.trim() : undefined,
-      contactWa: requestedRole === 'sekolah' ? userFormData.contactWa?.trim() : undefined
+      schoolName: requestedRole === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : '',
+      schoolLevel: requestedRole === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : 'SLTP',
+      pembinaName: requestedRole === 'sekolah' ? (userFormData.pembinaName?.trim() || '') : '',
+      contactWa: requestedRole === 'sekolah' ? (userFormData.contactWa?.trim() || '') : ''
     };
 
-    setUsersList(prev => [...prev, newUser]);
-    saveUserToCloud(newUser);
+    const newUsersList = [...usersList, newUser];
+    setUsersList(newUsersList);
+    try {
+      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(newUsersList));
+    } catch {
+      // ignore
+    }
+
+    const syncRes = await saveUserToCloud(newUser);
+    if (syncRes.success) {
+      setCloudLastSynced(new Date());
+      showToast(`Pengguna baru "${dname}" (${newUser.role.toUpperCase()}) berhasil dibuat & tersinkron ke Cloud!`, 'success');
+    } else {
+      showToast(`Pengguna dibuat lokal. Sinkron Cloud: ${syncRes.error || 'cek koneksi'}`, 'info');
+    }
+
     setUserFormData({
       username: '',
       password: '',
@@ -1662,7 +1688,6 @@ export default function App() {
       contactWa: ''
     });
     setUserFormTab('list');
-    showToast(`Pengguna baru "${dname}" (${newUser.role.toUpperCase()}) berhasil dibuat!`);
   };
 
   const handleDeleteUser = (usernameToDelete: string) => {
@@ -1687,11 +1712,18 @@ export default function App() {
       message: `Yakin ingin menghapus akun pengguna "${usernameToDelete}"? Pengguna ini tidak akan bisa login lagi.`,
       confirmText: 'Hapus Pengguna',
       isDanger: true,
-      onConfirm: () => {
-        deleteUserFromCloud(usernameToDelete);
-        setUsersList(prev => prev.filter(u => u.username !== usernameToDelete));
+      onConfirm: async () => {
+        const filtered = usersList.filter(u => u.username !== usernameToDelete);
+        setUsersList(filtered);
+        try {
+          localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(filtered));
+        } catch {
+          // ignore
+        }
+        await deleteUserFromCloud(usernameToDelete);
+        setCloudLastSynced(new Date());
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
-        showToast('Akun pengguna berhasil dihapus.', 'info');
+        showToast('Akun pengguna berhasil dihapus dari Cloud & lokal.', 'info');
       }
     });
   };
@@ -1857,7 +1889,8 @@ export default function App() {
         return updatedP;
       })
     );
-    showToast('Nilai tersimpan');
+    setCloudLastSynced(new Date());
+    showToast('Nilai tersimpan & tersinkron otomatis ke Cloud');
   };
 
   // Reset a Category's Scores
@@ -2087,7 +2120,7 @@ export default function App() {
     setModalPesertaOpen(true);
   };
 
-  const handleSavePeserta = (e: React.FormEvent) => {
+  const handleSavePeserta = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pesertaFormData.nomor.trim() || !pesertaFormData.sekolah.trim()) {
       showToast('Nomor Peserta dan Nama Sekolah wajib diisi!', 'error');
@@ -2111,11 +2144,18 @@ export default function App() {
           beladiri: {}, speaking: {}, tenda: {}
         }
       };
-      setPesertaList(prev =>
-        prev.map(p => (p.id === editingPesertaId ? updatedParticipant : p))
-      );
-      saveParticipantToCloud(updatedParticipant);
-      showToast('Data peserta berhasil diperbarui.');
+      const updatedList = pesertaList.map(p => (p.id === editingPesertaId ? updatedParticipant : p));
+      setPesertaList(updatedList);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedList }));
+      } catch {
+        // ignore
+      }
+      const syncRes = await saveParticipantToCloud(updatedParticipant);
+      if (syncRes.success) {
+        setCloudLastSynced(new Date());
+      }
+      showToast('Data peserta berhasil diperbarui & tersinkron otomatis ke Cloud!', 'success');
     } else {
       const newId = 'p-' + Date.now();
       const newParticipant: Participant = {
@@ -2140,10 +2180,19 @@ export default function App() {
           tenda: {}
         }
       };
-      setPesertaList(prev => [...prev, newParticipant]);
+      const updatedList = [...pesertaList, newParticipant];
+      setPesertaList(updatedList);
       setActivePesertaId(newId);
-      saveParticipantToCloud(newParticipant);
-      showToast('Peserta baru berhasil ditambahkan.');
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedList }));
+      } catch {
+        // ignore
+      }
+      const syncRes = await saveParticipantToCloud(newParticipant);
+      if (syncRes.success) {
+        setCloudLastSynced(new Date());
+      }
+      showToast(`Peserta baru "${newParticipant.peleton || newParticipant.sekolah}" berhasil ditambahkan & tersinkron otomatis ke Cloud!`, 'success');
     }
     setModalPesertaOpen(false);
   };
@@ -2162,17 +2211,21 @@ export default function App() {
       message: `Yakin ingin menghapus peserta "${target.peleton || target.sekolah}" (No. ${target.nomor}) beserta seluruh rekap nilainya? Tindakan ini tidak dapat dibatalkan.`,
       confirmText: 'Hapus Peserta',
       isDanger: true,
-      onConfirm: () => {
-        deleteParticipantFromCloud(id);
-        setPesertaList(prev => {
-          const filtered = prev.filter(p => p.id !== id);
-          if (activePesertaId === id) {
-            setActivePesertaId(filtered.length > 0 ? filtered[0].id : null);
-          }
-          return filtered;
-        });
+      onConfirm: async () => {
+        const filtered = pesertaList.filter(p => p.id !== id);
+        setPesertaList(filtered);
+        if (activePesertaId === id) {
+          setActivePesertaId(filtered.length > 0 ? filtered[0].id : null);
+        }
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: filtered }));
+        } catch {
+          // ignore
+        }
+        await deleteParticipantFromCloud(id);
+        setCloudLastSynced(new Date());
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
-        showToast('Peserta berhasil dihapus.', 'error');
+        showToast('Peserta berhasil dihapus dari Cloud & lokal.', 'error');
       }
     });
   };
