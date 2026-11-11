@@ -68,6 +68,7 @@ import {
 import { RegistrationFormsView } from './components/RegistrationFormsView';
 import { RegistrationSubmissionsAdminView } from './components/RegistrationSubmissionsAdminView';
 import { PaymentGatewaySettingsModal } from './components/PaymentGatewaySettingsModal';
+import { BlankoEditorModal } from './components/BlankoEditorModal';
 import { LogoSettingModal } from './components/LogoSettingModal';
 import { SchoolAccountManagerModal } from './components/SchoolAccountManagerModal';
 import { CloudSyncModal } from './components/CloudSyncModal';
@@ -94,7 +95,11 @@ import {
   saveRegistrationToCloud,
   PaymentConfig,
   DEFAULT_PAYMENT_CONFIG,
-  RegistrationSubmission
+  RegistrationSubmission,
+  subscribeToBlankoConfig,
+  saveBlankoConfigToCloud,
+  BlankoConfig,
+  DEFAULT_BLANKO_CONFIG
 } from './lib/firebase';
 
 // ==========================================
@@ -780,12 +785,44 @@ export default function App() {
   // Sidebar Navigation & Collapsible Dropdown Accordions
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarCatDropdownOpen, setSidebarCatDropdownOpen] = useState(true);
-  const [sidebarPesertaDropdownOpen, setSidebarPesertaDropdownOpen] = useState(true);
-  const [sidebarFormDropdownOpen, setSidebarFormDropdownOpen] = useState(true);
-  const [sidebarRekapDropdownOpen, setSidebarRekapDropdownOpen] = useState(true);
+  const [sidebarCatDropdownOpen, setSidebarCatDropdownOpen] = useState(false);
+  const [sidebarPesertaDropdownOpen, setSidebarPesertaDropdownOpen] = useState(false);
+  const [sidebarFormDropdownOpen, setSidebarFormDropdownOpen] = useState(false);
+  const [sidebarRekapDropdownOpen, setSidebarRekapDropdownOpen] = useState(false);
   const [sidebarPesertaSearch, setSidebarPesertaSearch] = useState('');
   const [sidebarPesertaJenjang, setSidebarPesertaJenjang] = useState<'all' | 'SLTP' | 'SLTA'>('all');
+  const sidebarNavRef = useRef<HTMLDivElement>(null);
+
+  // Toggle one dropdown and auto-close others
+  const toggleSidebarDropdown = (menu: 'cat' | 'peserta' | 'rekap' | 'form') => {
+    setSidebarCatDropdownOpen(prev => (menu === 'cat' ? !prev : false));
+    setSidebarPesertaDropdownOpen(prev => (menu === 'peserta' ? !prev : false));
+    setSidebarRekapDropdownOpen(prev => (menu === 'rekap' ? !prev : false));
+    setSidebarFormDropdownOpen(prev => (menu === 'form' ? !prev : false));
+  };
+
+  const closeAllSidebarDropdowns = () => {
+    setSidebarCatDropdownOpen(false);
+    setSidebarPesertaDropdownOpen(false);
+    setSidebarRekapDropdownOpen(false);
+    setSidebarFormDropdownOpen(false);
+  };
+
+  // Close dropdowns when clicking outside without selecting
+  useEffect(() => {
+    const handleDocumentClick = (e: MouseEvent | TouchEvent) => {
+      if (sidebarNavRef.current && !sidebarNavRef.current.contains(e.target as Node)) {
+        closeAllSidebarDropdowns();
+      }
+    };
+
+    document.addEventListener('mousedown', handleDocumentClick);
+    document.addEventListener('touchstart', handleDocumentClick);
+    return () => {
+      document.removeEventListener('mousedown', handleDocumentClick);
+      document.removeEventListener('touchstart', handleDocumentClick);
+    };
+  }, []);
 
   // Custom Application Logo State
   const [appLogo, setAppLogo] = useState<string | null>(() => {
@@ -817,6 +854,10 @@ export default function App() {
   const [paymentConfig, setPaymentConfig] = useState<PaymentConfig>(DEFAULT_PAYMENT_CONFIG);
   const [registrationsList, setRegistrationsList] = useState<RegistrationSubmission[]>([]);
   const [modalPaymentSettingsOpen, setModalPaymentSettingsOpen] = useState(false);
+
+  // Blanko Template Customization State
+  const [blankoConfig, setBlankoConfig] = useState<BlankoConfig>(DEFAULT_BLANKO_CONFIG);
+  const [modalBlankoEditorOpen, setModalBlankoEditorOpen] = useState(false);
 
   // School Self-Registration State (Layar Login)
   const [authViewTab, setAuthViewTab] = useState<'login' | 'register_sekolah'>('login');
@@ -946,6 +987,7 @@ export default function App() {
     let unsubStatus: (() => void) | undefined;
     let unsubPayment: (() => void) | undefined;
     let unsubRegistrations: (() => void) | undefined;
+    let unsubBlanko: (() => void) | undefined;
 
     const initCloud = async () => {
       try {
@@ -1084,6 +1126,16 @@ export default function App() {
           err => console.error('Cloud registrations sync error:', err)
         );
 
+        // 8. Subscribe to Blanko Template Customization
+        unsubBlanko = subscribeToBlankoConfig(
+          cloudBlanko => {
+            if (cloudBlanko) {
+              setBlankoConfig(cloudBlanko);
+            }
+          },
+          err => console.error('Cloud blanko config sync error:', err)
+        );
+
         isInitialCloudSyncDone.current = true;
       } catch (err) {
         console.error('Cloud initialization failed:', err);
@@ -1101,6 +1153,7 @@ export default function App() {
       if (unsubStatus) unsubStatus();
       if (unsubPayment) unsubPayment();
       if (unsubRegistrations) unsubRegistrations();
+      if (unsubBlanko) unsubBlanko();
     };
   }, []);
 

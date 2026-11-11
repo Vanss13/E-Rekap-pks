@@ -608,3 +608,160 @@ export async function savePaymentConfigToCloud(config: PaymentConfig): Promise<{
   }
 }
 
+// ==========================================
+// BLANKO TEMPLATE CUSTOMIZATION (EDIT BLANGKO)
+// ==========================================
+
+export interface BlankoFormCustomization {
+  judul: string;
+  nomorPrefix: string;
+  syaratBerkas: string;
+  ttd1Label: string;
+  ttd2Label: string;
+  ttd3Label: string;
+  ttd3Nama: string;
+  ttd3Nrp?: string;
+}
+
+export interface BlankoConfig {
+  id?: string;
+  kopSurat: {
+    instansi: string;
+    poldaPolres: string;
+    satuan: string;
+    lembaga: string;
+    alamat: string;
+    watermarkText: string;
+    kotaTtd: string;
+    tahun: string;
+  };
+  forms: {
+    polisi_pelajar: BlankoFormCustomization;
+    calon_pks: BlankoFormCustomization;
+    kemah_balok1: BlankoFormCustomization;
+    pks_balok2: BlankoFormCustomization;
+  };
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export const DEFAULT_BLANKO_CONFIG: BlankoConfig = {
+  id: 'blanko_config',
+  kopSurat: {
+    instansi: 'KEPOLISIAN NEGARA REPUBLIK INDONESIA',
+    poldaPolres: 'DAERAH JAWA BARAT - RESOR MAJALENGKA',
+    satuan: 'SATUAN LALU LINTAS • UNIT KAMSEL',
+    lembaga: 'KORPS PATROLI KEAMANAN SEKOLAH (PKS)',
+    alamat: 'Sekretariat: Jl. K.H. Abdul Halim No. 518 Majalengka 45418 • Telp: (0233) 281110 • Email: pks.resmajalengka@gmail.com',
+    watermarkText: 'PASUKAN PKS',
+    kotaTtd: 'Majalengka',
+    tahun: '2026'
+  },
+  forms: {
+    polisi_pelajar: {
+      judul: 'FORMULIR PENDAFTARAN ANGGOTA POLISI PELAJAR (POLJAR)',
+      nomorPrefix: 'POLJAR/2026/01-REG',
+      syaratBerkas: '1. Pas Foto 3x4 berseragam lengkap (2 lembar)\n2. Surat Izin Orang Tua/Wali Siswa\n3. Fotokopi Kartu Pelajar / Surat Keterangan Kepala Sekolah',
+      ttd1Label: 'Calon Anggota Polisi Pelajar',
+      ttd2Label: 'Pembina PKS Pangkalan',
+      ttd3Label: 'Kasat Lantas Polres Majalengka',
+      ttd3Nama: 'AKP Mochamad Ali, S.H., M.M.',
+      ttd3Nrp: 'NRP 78090123'
+    },
+    calon_pks: {
+      judul: 'FORMULIR BIODATA CALON ANGGOTA PATROLI KEAMANAN SEKOLAH (PKS)',
+      nomorPrefix: 'PKS-CAP/2026/REG-01',
+      syaratBerkas: '1. Pas Foto 3x4 seragam sekolah (2 lembar)\n2. Surat Pernyataan Kesediaan Mengikuti Seluruh Rangkaian Diklat\n3. Surat Rekomendasi Kesiswaan',
+      ttd1Label: 'Calon Anggota PKS',
+      ttd2Label: 'Pembina PKS Pangkalan',
+      ttd3Label: 'Kanit Kamsel Satlantas Polres',
+      ttd3Nama: 'Ipda Supriatna',
+      ttd3Nrp: 'NRP 82050456'
+    },
+    kemah_balok1: {
+      judul: 'FORMULIR PENDAFTARAN PERKEMAHAN & DIKLAT PKS BALOK 1',
+      nomorPrefix: 'BALOK1/KEMAH/2026/01',
+      syaratBerkas: '1. Surat Tugas/Mandat Kepala Sekolah\n2. Formulir Registrasi Regu Peserta Lengkap (12 Anggota)\n3. Surat Keterangan Sehat dari Fasilitas Kesehatan / Puskesmas',
+      ttd1Label: 'Ketua Regu / Pinsat',
+      ttd2Label: 'Pembina Pendamping',
+      ttd3Label: 'Ketua Panitia Pelaksana',
+      ttd3Nama: 'Iptu Agus Salim',
+      ttd3Nrp: 'NRP 80030112'
+    },
+    pks_balok2: {
+      judul: 'FORMULIR UJIAN KENAIKAN TINGKAT INSTRUKTUR PKS BALOK 2',
+      nomorPrefix: 'BALOK2/UJI/2026/01',
+      syaratBerkas: '1. Fotokopi Sertifikat Kelulusan PKS Balok 1\n2. Surat Rekomendasi Pembina PKS Pangkalan\n3. Surat Izin Tertulis dari Kepala Sekolah',
+      ttd1Label: 'Peserta Ujian Balok 2',
+      ttd2Label: 'Pembina PKS Pangkalan',
+      ttd3Label: 'Tim Penguji Satlantas Polri',
+      ttd3Nama: 'Iptu Agus Salim',
+      ttd3Nrp: 'NRP 80030112'
+    }
+  }
+};
+
+export function subscribeToBlankoConfig(
+  onUpdate: (config: BlankoConfig) => void,
+  onError?: (err: any) => void
+) {
+  const path = 'settings/blanko_config';
+  return onSnapshot(
+    doc(db, 'settings', 'blanko_config'),
+    docSnap => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        onUpdate({
+          id: 'blanko_config',
+          kopSurat: {
+            ...DEFAULT_BLANKO_CONFIG.kopSurat,
+            ...(data.kopSurat || {})
+          },
+          forms: {
+            polisi_pelajar: {
+              ...DEFAULT_BLANKO_CONFIG.forms.polisi_pelajar,
+              ...(data.forms?.polisi_pelajar || {})
+            },
+            calon_pks: {
+              ...DEFAULT_BLANKO_CONFIG.forms.calon_pks,
+              ...(data.forms?.calon_pks || {})
+            },
+            kemah_balok1: {
+              ...DEFAULT_BLANKO_CONFIG.forms.kemah_balok1,
+              ...(data.forms?.kemah_balok1 || {})
+            },
+            pks_balok2: {
+              ...DEFAULT_BLANKO_CONFIG.forms.pks_balok2,
+              ...(data.forms?.pks_balok2 || {})
+            }
+          },
+          updatedAt: data.updatedAt || '',
+          updatedBy: data.updatedBy || ''
+        });
+      } else {
+        onUpdate(DEFAULT_BLANKO_CONFIG);
+      }
+    },
+    error => {
+      handleFirestoreError(error, OperationType.GET, path);
+      if (onError) onError(error);
+    }
+  );
+}
+
+export async function saveBlankoConfigToCloud(config: BlankoConfig): Promise<{ success: boolean; error?: string }> {
+  const path = 'settings/blanko_config';
+  try {
+    const cleanDoc = sanitizeForFirestore({
+      ...config,
+      id: 'blanko_config',
+      updatedAt: new Date().toISOString()
+    });
+    await setDoc(doc(db, 'settings', 'blanko_config'), cleanDoc);
+    return { success: true };
+  } catch (error) {
+    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
+    return { success: false, error: errInfo.error };
+  }
+}
+
