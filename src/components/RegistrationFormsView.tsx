@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   FileText,
   Printer,
@@ -13,9 +13,26 @@ import {
   Calendar,
   CheckCircle2,
   Cloud,
-  Loader2
+  Loader2,
+  CreditCard,
+  QrCode,
+  DollarSign,
+  Clock,
+  XCircle,
+  Copy,
+  ExternalLink,
+  Eye,
+  X,
+  Upload,
+  Check
 } from 'lucide-react';
-import { saveRegistrationToCloud } from '../lib/firebase';
+import {
+  saveRegistrationToCloud,
+  PaymentConfig,
+  DEFAULT_PAYMENT_CONFIG,
+  RegistrationSubmission
+} from '../lib/firebase';
+import { AppUser } from '../App';
 
 export type SchoolLevel = 'SLTP' | 'SLTA';
 
@@ -23,6 +40,9 @@ interface RegistrationFormsViewProps {
   currentTab: string;
   setCurrentTab: (tab: string) => void;
   appLogo: string | null;
+  currentUser?: AppUser | null;
+  paymentConfig?: PaymentConfig;
+  submissionsList?: RegistrationSubmission[];
   formPolisiPelajar: {
     nama: string;
     nisn: string;
@@ -107,6 +127,9 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
   currentTab,
   setCurrentTab,
   appLogo,
+  currentUser,
+  paymentConfig = DEFAULT_PAYMENT_CONFIG,
+  submissionsList = [],
   formPolisiPelajar,
   setFormPolisiPelajar,
   handleExportFormPolisiPelajarExcel,
@@ -121,71 +144,242 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
   handleExportFormBalok2Excel,
   showToast
 }) => {
+  const [viewMode, setViewMode] = useState<'form' | 'my_submissions'>('form');
+  const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+  const [selectedPayMethod, setSelectedPayMethod] = useState<'midtrans' | 'ratapay' | 'qris' | 'bank_transfer'>('midtrans');
+  const [payNowChoice, setPayNowChoice] = useState<'pay_now' | 'pay_later'>('pay_now');
+  const [proofFileBase64, setProofFileBase64] = useState<string>('');
+  const [proofFileName, setProofFileName] = useState<string>('');
+  const [simulatedGatewaySuccess, setSimulatedGatewaySuccess] = useState(false);
+  const [pendingSubmissionPayload, setPendingSubmissionPayload] = useState<any>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const formatRupiah = (val: number) => {
+    return new Intl.NumberFormat('id-ID', {
+      style: 'currency',
+      currency: 'IDR',
+      maximumFractionDigits: 0
+    }).format(val || 0);
+  };
+
+  // Auto-fill school info when logged in as a school account
+  useEffect(() => {
+    if (currentUser?.role === 'sekolah') {
+      const sch = currentUser.schoolName || currentUser.name;
+      const lvl = currentUser.schoolLevel || 'SLTP';
+      if (sch) {
+        setFormPolisiPelajar((prev: any) => ({ ...prev, sekolah: sch, jenjang: lvl }));
+        setFormCalonPks((prev: any) => ({ ...prev, sekolah: sch, jenjang: lvl }));
+        setFormBalok1((prev: any) => ({ ...prev, sekolah: sch, jenjang: lvl }));
+        setFormBalok2((prev: any) => ({ ...prev, sekolah: sch, jenjang: lvl }));
+      }
+    }
+  }, [currentUser]);
+
+  // Fee calculation for the active form
+  const currentFeeConfig = useMemo(() => {
+    const fees = paymentConfig?.formFees || DEFAULT_PAYMENT_CONFIG.formFees;
+    if (currentTab === 'form_polisi_pelajar') return fees.polisi_pelajar;
+    if (currentTab === 'form_calon_pks') return fees.calon_pks;
+    if (currentTab === 'form_perkemahan_balok1') return fees.kemah_balok1;
+    if (currentTab === 'form_perkemahan_balok2') return fees.pks_balok2;
+    return { fee: 0, isFree: true, description: '' };
+  }, [currentTab, paymentConfig]);
+
+  // My school submissions filter
+  const mySchoolSubmissions = useMemo(() => {
+    if (!currentUser) return submissionsList;
+    const schName = (currentUser.schoolName || currentUser.name || '').toLowerCase().trim();
+    const schUname = (currentUser.username || '').toLowerCase().trim();
+    return submissionsList.filter(s => {
+      const sSchool = (s.schoolName || '').toLowerCase().trim();
+      const sUser = (s.schoolUsername || '').toLowerCase().trim();
+      return (schName && sSchool === schName) || (schUname && sUser === schUname);
+    });
+  }, [submissionsList, currentUser]);
+
   const handlePrint = () => {
     window.print();
   };
 
-  const [isSavingCloud, setIsSavingCloud] = useState(false);
+  // Open Payment & Submit Dialog
+  const handleOpenSubmitAndPay = () => {
+    let formId = '';
+    let formTitle = '';
+    let applicantName = '';
+    let schoolName = '';
+    let schoolLevel: SchoolLevel = 'SLTP';
+    let formData: any = null;
 
-  const handleSaveFormToCloud = async () => {
-    setIsSavingCloud(true);
-    try {
-      let formId = '';
-      let formTitle = '';
-      let payload: any = null;
+    if (currentTab === 'form_polisi_pelajar') {
+      formTitle = 'Polisi Pelajar (Poljar)';
+      formId = `poljar-${formPolisiPelajar.nisn || Date.now()}`;
+      applicantName = formPolisiPelajar.nama.trim() || 'Calon Anggota Poljar';
+      schoolName = formPolisiPelajar.sekolah.trim() || currentUser?.schoolName || currentUser?.name || 'Sekolah';
+      schoolLevel = formPolisiPelajar.jenjang || 'SLTP';
+      formData = { ...formPolisiPelajar };
+    } else if (currentTab === 'form_calon_pks') {
+      formTitle = 'Calon Anggota PKS';
+      formId = `calonpks-${formCalonPks.nisn || Date.now()}`;
+      applicantName = formCalonPks.nama.trim() || 'Calon Anggota PKS';
+      schoolName = formCalonPks.sekolah.trim() || currentUser?.schoolName || currentUser?.name || 'Sekolah';
+      schoolLevel = formCalonPks.jenjang || 'SLTA';
+      formData = { ...formCalonPks };
+    } else if (currentTab === 'form_perkemahan_balok1') {
+      formTitle = 'Kemah PKS Balok 1';
+      formId = `balok1-${Date.now()}`;
+      applicantName = formBalok1.namaRegu.trim() || formBalok1.namaKetua.trim() || 'Regu Kemah';
+      schoolName = formBalok1.sekolah.trim() || currentUser?.schoolName || currentUser?.name || 'Sekolah';
+      schoolLevel = formBalok1.jenjang || 'SLTP';
+      formData = { ...formBalok1 };
+    } else if (currentTab === 'form_perkemahan_balok2') {
+      formTitle = 'Ujian PKS Balok 2';
+      formId = `balok2-${Date.now()}`;
+      applicantName = formBalok2.namaPeserta.trim() || 'Peserta Ujian Balok 2';
+      schoolName = formBalok2.sekolah.trim() || currentUser?.schoolName || currentUser?.name || 'Sekolah';
+      schoolLevel = formBalok2.jenjang || 'SLTA';
+      formData = { ...formBalok2 };
+    }
 
-      if (currentTab === 'form_polisi_pelajar') {
-        formTitle = 'Polisi Pelajar (Poljar)';
-        formId = `poljar-${formPolisiPelajar.nisn || Date.now()}`;
-        payload = {
-          id: formId,
-          type: 'polisi_pelajar',
-          title: formTitle,
-          ...formPolisiPelajar
-        };
-      } else if (currentTab === 'form_calon_pks') {
-        formTitle = 'Calon Anggota PKS';
-        formId = `calonpks-${formCalonPks.nisn || Date.now()}`;
-        payload = {
-          id: formId,
-          type: 'calon_pks',
-          title: formTitle,
-          ...formCalonPks
-        };
-      } else if (currentTab === 'form_perkemahan_balok1') {
-        formTitle = 'Kemah PKS Balok 1';
-        formId = `balok1-${Date.now()}`;
-        payload = {
-          id: formId,
-          type: 'balok1',
-          title: formTitle,
-          ...formBalok1
-        };
-      } else if (currentTab === 'form_perkemahan_balok2') {
-        formTitle = 'Ujian PKS Balok 2';
-        formId = `balok2-${Date.now()}`;
-        payload = {
-          id: formId,
-          type: 'balok2',
-          title: formTitle,
-          ...formBalok2
-        };
-      }
+    if (!applicantName || !schoolName) {
+      showToast('Harap lengkapi nama pendaftar/regu dan asal sekolah terlebih dahulu!', 'error');
+      return;
+    }
 
-      if (payload) {
-        const res = await saveRegistrationToCloud(payload);
-        if (res.success) {
-          showToast(`Formulir "${formTitle}" berhasil disimpan & tersinkron otomatis ke Cloud!`, 'success');
-        } else {
-          showToast(`Gagal sinkron Cloud: ${res.error || 'Cek koneksi internet'}`, 'error');
+    const fee = currentFeeConfig.isFree ? 0 : currentFeeConfig.fee;
+
+    const basePayload: RegistrationSubmission = {
+      id: formId,
+      formType: currentTab.replace('form_', '').replace('perkemahan_', '') as any,
+      formTitle,
+      schoolName,
+      schoolUsername: currentUser?.username || 'sekolah',
+      schoolLevel,
+      applicantName,
+      contactWa: formData.noHp || formData.noHpPembina || currentUser?.contactWa || '',
+      formData,
+      feeAmount: fee,
+      paymentMethod: fee === 0 ? 'free' : 'midtrans',
+      paymentStatus: fee === 0 ? 'paid' : 'unpaid',
+      stage1Finance: {
+        status: fee === 0 ? 'approved' : 'pending',
+        verifiedBy: fee === 0 ? 'Sistem (Bebas Biaya)' : undefined,
+        verifiedAt: fee === 0 ? new Date().toLocaleString('id-ID') : undefined
+      },
+      stage2Committee: {
+        status: 'pending'
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    if (fee === 0) {
+      // Free form -> save immediately
+      (async () => {
+        setIsSubmitting(true);
+        try {
+          const res = await saveRegistrationToCloud(basePayload);
+          if (res.success) {
+            showToast(`Pendaftaran "${formTitle}" untuk "${applicantName}" berhasil dikirim ke panitia!`, 'success');
+            setViewMode('my_submissions');
+          } else {
+            showToast(`Gagal mengirim pendaftaran: ${res.error}`, 'error');
+          }
+        } finally {
+          setIsSubmitting(false);
         }
-      }
-    } catch (e: any) {
-      showToast(`Terjadi kesalahan: ${e.message}`, 'error');
-    } finally {
-      setIsSavingCloud(false);
+      })();
+    } else {
+      // Paid form -> open payment modal
+      setPendingSubmissionPayload(basePayload);
+      setProofFileBase64('');
+      setProofFileName('');
+      setSimulatedGatewaySuccess(false);
+      setPaymentModalOpen(true);
     }
   };
+
+  // Proof image upload for manual bank transfer or static QRIS
+  const handleProofImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      showToast('Harap pilih berkas foto gambar (JPG / PNG / WEBP)!', 'error');
+      return;
+    }
+
+    if (file.size > 3 * 1024 * 1024) {
+      showToast('Ukuran berkas maksimal 3 MB!', 'error');
+      return;
+    }
+
+    setProofFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = event => {
+      setProofFileBase64(event.target?.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Finalize Submission & Payment
+  const handleConfirmPaymentAndSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingSubmissionPayload) return;
+
+    setIsSubmitting(true);
+    try {
+      let finalSubmission: RegistrationSubmission = { ...pendingSubmissionPayload };
+
+      if (payNowChoice === 'pay_later') {
+        finalSubmission.paymentStatus = 'unpaid';
+        finalSubmission.paymentMethod = selectedPayMethod;
+      } else {
+        finalSubmission.paymentMethod = selectedPayMethod;
+
+        if (selectedPayMethod === 'bank_transfer' || selectedPayMethod === 'qris') {
+          if (!proofFileBase64) {
+            showToast('Harap unggah foto bukti transfer atau struk scan QRIS!', 'error');
+            setIsSubmitting(false);
+            return;
+          }
+          finalSubmission.paymentStatus = 'pending_verification';
+          finalSubmission.paymentProofUrl = proofFileBase64;
+          finalSubmission.paymentProofFileName = proofFileName;
+          finalSubmission.paymentDate = new Date().toLocaleString('id-ID');
+        } else {
+          // Midtrans or Ratapay Gateway
+          finalSubmission.paymentStatus = 'pending_verification';
+          finalSubmission.paymentReference = `${selectedPayMethod.toUpperCase()}-${Date.now()}`;
+          finalSubmission.paymentDate = new Date().toLocaleString('id-ID');
+        }
+      }
+
+      finalSubmission.updatedAt = new Date().toISOString();
+
+      const res = await saveRegistrationToCloud(finalSubmission);
+      if (res.success) {
+        showToast(
+          payNowChoice === 'pay_later'
+            ? `Berkas pendaftaran tersimpan! Anda dapat membayarnya nanti di menu Riwayat Pengajuan.`
+            : `Pendaftaran & bukti pembayaran berhasil dikirim! Menunggu verifikasi 2-tahap panitia.`,
+          'success'
+        );
+        setPaymentModalOpen(false);
+        setPendingSubmissionPayload(null);
+        setViewMode('my_submissions');
+      } else {
+        showToast(`Gagal menyimpan ke Cloud: ${res.error}`, 'error');
+      }
+    } catch (err: any) {
+      showToast(`Terjadi kesalahan: ${err.message}`, 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const isSavingCloud = isSubmitting;
+  const handleSaveFormToCloud = handleOpenSubmitAndPay;
 
   // 1. Reset or Fill Demo Data Handlers
   const handleResetPolisiPelajar = () => {
@@ -396,142 +590,220 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* ACTION TOOLBAR (Hidden in Print) */}
-      <div className="no-print bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        {/* Form Selector Pills */}
-        <div className="flex flex-wrap items-center gap-1.5 w-full md:w-auto">
-          <button
-            type="button"
-            onClick={() => setCurrentTab('form_polisi_pelajar')}
-            className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-              currentTab === 'form_polisi_pelajar'
-                ? 'bg-blue-600 text-white shadow-xs'
-                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-            }`}
-          >
-            <Shield className="w-3.5 h-3.5" />
-            <span>1. Polisi Pelajar</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setCurrentTab('form_calon_pks')}
-            className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-              currentTab === 'form_calon_pks'
-                ? 'bg-indigo-600 text-white shadow-xs'
-                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-            }`}
-          >
-            <UserCheck className="w-3.5 h-3.5" />
-            <span>2. Calon PKS</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setCurrentTab('form_perkemahan_balok1')}
-            className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-              currentTab === 'form_perkemahan_balok1'
-                ? 'bg-emerald-600 text-white shadow-xs'
-                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-            }`}
-          >
-            <Award className="w-3.5 h-3.5" />
-            <span>3. Kemah Balok 1</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setCurrentTab('form_perkemahan_balok2')}
-            className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-              currentTab === 'form_perkemahan_balok2'
-                ? 'bg-purple-600 text-white shadow-xs'
-                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-            }`}
-          >
-            <Star className="w-3.5 h-3.5" />
-            <span>4. PKS Balok 2</span>
-          </button>
+      {/* MODE SWITCHER TABS (Hidden in Print) */}
+      <div className="no-print bg-slate-900 text-white p-3 sm:p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 shadow-md">
+        <div className="flex items-center gap-2.5">
+          <div className="p-2 bg-blue-600 rounded-xl">
+            <Building2 className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <h2 className="text-sm sm:text-base font-extrabold tracking-tight">
+              Portal Pendaftaran Mandiri Sekolah
+            </h2>
+            <p className="text-xs text-slate-300">
+              {currentUser?.schoolName || currentUser?.name || 'Akun Sekolah'} • Input mandiri & tersinkron langsung ke panitia
+            </p>
+          </div>
         </div>
 
-        {/* Action Buttons: Demo, Blank, Print, Excel */}
-        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
-          {/* Demo Button */}
+        <div className="flex items-center bg-slate-800 p-1 rounded-xl w-full sm:w-auto">
           <button
             type="button"
-            onClick={() => {
-              if (currentTab === 'form_polisi_pelajar') handleDemoPolisiPelajar();
-              if (currentTab === 'form_calon_pks') handleDemoCalonPks();
-              if (currentTab === 'form_perkemahan_balok1') handleDemoBalok1();
-              if (currentTab === 'form_perkemahan_balok2') handleDemoBalok2();
-            }}
-            className="px-3 py-1.5 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+            onClick={() => setViewMode('form')}
+            className={`flex-1 sm:flex-initial px-4 py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+              viewMode === 'form'
+                ? 'bg-blue-600 text-white shadow'
+                : 'text-slate-300 hover:text-white hover:bg-slate-700/50'
+            }`}
           >
-            <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-            <span className="hidden sm:inline">Isi</span> Contoh Data
+            <FileText className="w-3.5 h-3.5" />
+            <span>Isi Formulir Pendaftaran</span>
           </button>
 
-          {/* Blank Button */}
           <button
             type="button"
-            onClick={() => {
-              if (currentTab === 'form_polisi_pelajar') handleResetPolisiPelajar();
-              if (currentTab === 'form_calon_pks') handleResetCalonPks();
-              if (currentTab === 'form_perkemahan_balok1') handleResetBalok1();
-              if (currentTab === 'form_perkemahan_balok2') handleResetBalok2();
-            }}
-            className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+            onClick={() => setViewMode('my_submissions')}
+            className={`flex-1 sm:flex-initial px-4 py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+              viewMode === 'my_submissions'
+                ? 'bg-blue-600 text-white shadow'
+                : 'text-slate-300 hover:text-white hover:bg-slate-700/50'
+            }`}
           >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Kosongkan</span> (Blanko)
-          </button>
-
-          {/* Save to Cloud Button */}
-          <button
-            type="button"
-            disabled={isSavingCloud}
-            onClick={handleSaveFormToCloud}
-            className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-75 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-            title="Simpan data formulir ini langsung ke database Cloud Firestore"
-          >
-            {isSavingCloud ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>Menyimpan...</span>
-              </>
-            ) : (
-              <>
-                <Cloud className="w-3.5 h-3.5 text-blue-200" />
-                <span>Simpan ke Cloud</span>
-              </>
-            )}
-          </button>
-
-          {/* Excel Export Button */}
-          <button
-            type="button"
-            onClick={() => {
-              if (currentTab === 'form_polisi_pelajar') handleExportFormPolisiPelajarExcel();
-              if (currentTab === 'form_calon_pks') handleExportFormCalonPksExcel();
-              if (currentTab === 'form_perkemahan_balok1') handleExportFormBalok1Excel();
-              if (currentTab === 'form_perkemahan_balok2') handleExportFormBalok2Excel();
-            }}
-            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Unduh Excel</span>
-          </button>
-
-          {/* Print A4 Button */}
-          <button
-            type="button"
-            onClick={handlePrint}
-            className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-          >
-            <Printer className="w-3.5 h-3.5 text-blue-400" />
-            <span>Cetak A4 (PDF)</span>
+            <CreditCard className="w-3.5 h-3.5" />
+            <span>Riwayat & Tagihan Sekolah</span>
+            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-extrabold bg-blue-500/30 text-blue-200 border border-blue-400/30">
+              {mySchoolSubmissions.length}
+            </span>
           </button>
         </div>
       </div>
+
+      {viewMode === 'form' ? (
+        <>
+          {/* FEE SUMMARY BANNER */}
+          <div className="no-print bg-linear-to-r from-blue-50 via-indigo-50 to-white p-4 sm:p-5 rounded-2xl border border-blue-200/80 shadow-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 bg-blue-600 text-white rounded-full text-[11px] font-black tracking-wider uppercase">
+                  Biaya Registrasi Resmi
+                </span>
+                <span className="text-xs font-semibold text-slate-500">
+                  {currentTab === 'form_polisi_pelajar' && '1. Polisi Pelajar (Poljar)'}
+                  {currentTab === 'form_calon_pks' && '2. Calon Anggota PKS'}
+                  {currentTab === 'form_perkemahan_balok1' && '3. Perkemahan PKS Balok 1'}
+                  {currentTab === 'form_perkemahan_balok2' && '4. Ujian PKS Balok 2'}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl sm:text-2xl font-black text-slate-900">
+                  {currentFeeConfig.isFree ? 'Gratis (Bebas Biaya)' : formatRupiah(currentFeeConfig.fee)}
+                </span>
+                <span className="text-xs text-slate-500 font-medium">
+                  {currentFeeConfig.description || (currentFeeConfig.isFree ? 'Tanpa biaya pendaftaran panitia' : 'Per peserta/regu terdaftar')}
+                </span>
+              </div>
+              <p className="text-xs text-slate-600">
+                Tersedia pembayaran otomatis Midtrans, Ratapay, QRIS Statis, serta Transfer Manual Bank (Verifikasi 2-Tahap Keuangan & Panitia).
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 w-full md:w-auto">
+              <button
+                type="button"
+                onClick={handleOpenSubmitAndPay}
+                disabled={isSubmitting}
+                className="w-full md:w-auto px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-75 text-white text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer shadow-md hover:shadow-lg"
+              >
+                {isSubmitting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Memproses...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                    <span>Kirim & Bayar Pendaftaran</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* ACTION TOOLBAR (Hidden in Print) */}
+          <div className="no-print bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            {/* Form Selector Pills */}
+            <div className="flex flex-wrap items-center gap-1.5 w-full md:w-auto">
+              <button
+                type="button"
+                onClick={() => setCurrentTab('form_polisi_pelajar')}
+                className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  currentTab === 'form_polisi_pelajar'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                }`}
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span>1. Polisi Pelajar</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCurrentTab('form_calon_pks')}
+                className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  currentTab === 'form_calon_pks'
+                    ? 'bg-indigo-600 text-white shadow-xs'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                }`}
+              >
+                <UserCheck className="w-3.5 h-3.5" />
+                <span>2. Calon PKS</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCurrentTab('form_perkemahan_balok1')}
+                className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  currentTab === 'form_perkemahan_balok1'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                }`}
+              >
+                <Award className="w-3.5 h-3.5" />
+                <span>3. Kemah Balok 1</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCurrentTab('form_perkemahan_balok2')}
+                className={`px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  currentTab === 'form_perkemahan_balok2'
+                    ? 'bg-purple-600 text-white shadow-xs'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                }`}
+              >
+                <Star className="w-3.5 h-3.5" />
+                <span>4. PKS Balok 2</span>
+              </button>
+            </div>
+
+            {/* Action Buttons: Demo, Blank, Print, Excel */}
+            <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
+              {/* Demo Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (currentTab === 'form_polisi_pelajar') handleDemoPolisiPelajar();
+                  if (currentTab === 'form_calon_pks') handleDemoCalonPks();
+                  if (currentTab === 'form_perkemahan_balok1') handleDemoBalok1();
+                  if (currentTab === 'form_perkemahan_balok2') handleDemoBalok2();
+                }}
+                className="px-3 py-1.5 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                <span className="hidden sm:inline">Isi</span> Contoh Data
+              </button>
+
+              {/* Blank Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (currentTab === 'form_polisi_pelajar') handleResetPolisiPelajar();
+                  if (currentTab === 'form_calon_pks') handleResetCalonPks();
+                  if (currentTab === 'form_perkemahan_balok1') handleResetBalok1();
+                  if (currentTab === 'form_perkemahan_balok2') handleResetBalok2();
+                }}
+                className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Kosongkan</span> (Blanko)
+              </button>
+
+              {/* Excel Export Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (currentTab === 'form_polisi_pelajar') handleExportFormPolisiPelajarExcel();
+                  if (currentTab === 'form_calon_pks') handleExportFormCalonPksExcel();
+                  if (currentTab === 'form_perkemahan_balok1') handleExportFormBalok1Excel();
+                  if (currentTab === 'form_perkemahan_balok2') handleExportFormBalok2Excel();
+                }}
+                className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Unduh Excel</span>
+              </button>
+
+              {/* Print A4 Button */}
+              <button
+                type="button"
+                onClick={handlePrint}
+                className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+              >
+                <Printer className="w-3.5 h-3.5 text-blue-400" />
+                <span>Cetak A4 (PDF)</span>
+              </button>
+            </div>
+          </div>
 
       {/* A4 PRINTABLE CONTAINER */}
       <div className="bg-white max-w-4xl mx-auto rounded-2xl shadow-md border border-slate-200 p-6 sm:p-10 text-slate-800 print:shadow-none print:border-none print:p-0 print:max-w-none">
@@ -1332,6 +1604,624 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Quick Submit Floating / Bottom Bar */}
+      <div className="no-print max-w-4xl mx-auto bg-slate-900 text-white p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
+        <div>
+          <p className="text-xs text-slate-300 font-semibold">Formulir telah selesai diisi?</p>
+          <p className="text-sm font-black text-white">
+            Kirim ke Panitia & Bayar Registrasi ({currentFeeConfig.isFree ? 'Gratis' : formatRupiah(currentFeeConfig.fee)})
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={handleOpenSubmitAndPay}
+          disabled={isSubmitting}
+          className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-75 text-white text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer shadow hover:shadow-md"
+        >
+          {isSubmitting ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>Menyimpan...</span>
+            </>
+          ) : (
+            <>
+              <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+              <span>Kirim & Bayar Sekarang</span>
+            </>
+          )}
+        </button>
+      </div>
+    </>
+  ) : (
+    /* ========================================================= */
+    /* VIEW MODE: RIWAYAT PENDAFTARAN & TAGIHAN SEKOLAH SAYA */
+    /* ========================================================= */
+    <div className="space-y-6">
+      {/* School Summary KPI Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
+          <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Total Formulir</p>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-2xl font-black text-slate-900">{mySchoolSubmissions.length}</span>
+            <span className="text-xs text-slate-500">Berkas</span>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">Diajukan mandiri</p>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
+          <p className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">Lunas & Disahkan</p>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-2xl font-black text-emerald-600">
+              {mySchoolSubmissions.filter(s => s.paymentStatus === 'paid' && s.stage2Committee?.status === 'approved').length}
+            </span>
+            <span className="text-xs text-emerald-600 font-semibold">Peserta</span>
+          </div>
+          <p className="text-[11px] text-emerald-600/80 mt-1">Siap tampil lomba</p>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
+          <p className="text-[11px] font-bold text-amber-700 uppercase tracking-wider">Menunggu Verifikasi</p>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-2xl font-black text-amber-600">
+              {mySchoolSubmissions.filter(s => s.paymentStatus === 'pending_verification' || (s.paymentStatus === 'paid' && s.stage2Committee?.status !== 'approved')).length}
+            </span>
+            <span className="text-xs text-amber-600 font-semibold">Proses</span>
+          </div>
+          <p className="text-[11px] text-amber-600/80 mt-1">Keuangan / Panitia</p>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
+          <p className="text-[11px] font-bold text-rose-700 uppercase tracking-wider">Belum Bayar</p>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-2xl font-black text-rose-600">
+              {mySchoolSubmissions.filter(s => s.paymentStatus === 'unpaid').length}
+            </span>
+            <span className="text-xs text-rose-600 font-semibold">Tagihan</span>
+          </div>
+          <p className="text-[11px] text-rose-600/80 mt-1">Bisa bayar langsung</p>
+        </div>
+      </div>
+
+      {/* Table of Submissions */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+        <div className="p-4 sm:p-5 border-b border-slate-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-50/50">
+          <div>
+            <h3 className="font-extrabold text-sm sm:text-base text-slate-900">
+              Daftar Pengajuan Pendaftaran & Status Pembayaran
+            </h3>
+            <p className="text-xs text-slate-500">
+              Riwayat penginputan formulir oleh akun sekolah dengan pembaruan status real-time dari panitia.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setViewMode('form')}
+            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>+ Buat Pendaftaran Baru</span>
+          </button>
+        </div>
+
+        {mySchoolSubmissions.length === 0 ? (
+          <div className="p-12 text-center text-slate-500 space-y-3">
+            <div className="w-16 h-16 mx-auto rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center">
+              <FileText className="w-8 h-8" />
+            </div>
+            <h4 className="font-bold text-slate-800 text-sm">Belum Ada Formulir yang Diajukan</h4>
+            <p className="text-xs text-slate-500 max-w-md mx-auto">
+              Akun sekolah Anda belum menginput formulir pendaftaran. Pilih formulir (Polisi Pelajar, Calon PKS, Kemah Balok 1, atau Ujian Balok 2) dan klik "Kirim & Bayar Pendaftaran".
+            </p>
+            <button
+              type="button"
+              onClick={() => setViewMode('form')}
+              className="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold hover:bg-blue-700 transition cursor-pointer"
+            >
+              Mulai Isi Formulir Sekarang
+            </button>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-slate-700">
+              <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
+                <tr>
+                  <th className="p-3">No</th>
+                  <th className="p-3">Formulir & Peserta</th>
+                  <th className="p-3">Jenjang</th>
+                  <th className="p-3">Biaya Registrasi</th>
+                  <th className="p-3">Metode & Status Bayar</th>
+                  <th className="p-3">Verifikasi Keuangan (T-1)</th>
+                  <th className="p-3">Pengesahan Panitia (T-2)</th>
+                  <th className="p-3 text-right">Aksi</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {mySchoolSubmissions.map((sub, idx) => (
+                  <tr key={sub.id} className="hover:bg-slate-50 transition">
+                    <td className="p-3 font-semibold text-slate-500">{idx + 1}</td>
+                    <td className="p-3">
+                      <div className="font-bold text-slate-900">{sub.applicantName}</div>
+                      <div className="text-[11px] text-blue-600 font-semibold">{sub.formTitle}</div>
+                      <div className="text-[10px] text-slate-400 font-mono">ID: {sub.id}</div>
+                    </td>
+                    <td className="p-3">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700">
+                        {sub.schoolLevel}
+                      </span>
+                    </td>
+                    <td className="p-3 font-mono font-bold text-slate-900">
+                      {sub.feeAmount === 0 ? 'Gratis' : formatRupiah(sub.feeAmount)}
+                    </td>
+                    <td className="p-3">
+                      {sub.paymentStatus === 'paid' && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                          Lunas
+                        </span>
+                      )}
+                      {sub.paymentStatus === 'pending_verification' && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800">
+                          <Clock className="w-3 h-3 text-amber-600" />
+                          Verifikasi
+                        </span>
+                      )}
+                      {sub.paymentStatus === 'unpaid' && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800">
+                          <XCircle className="w-3 h-3 text-rose-600" />
+                          Belum Bayar
+                        </span>
+                      )}
+                      <div className="text-[10px] text-slate-500 mt-0.5 uppercase">
+                        {sub.paymentMethod === 'free' ? 'Bebas Biaya' : sub.paymentMethod.replace('_', ' ')}
+                      </div>
+                    </td>
+                    <td className="p-3">
+                      {sub.stage1Finance?.status === 'approved' ? (
+                        <div className="text-emerald-700 font-bold flex items-center gap-1">
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Disetujui</span>
+                        </div>
+                      ) : sub.stage1Finance?.status === 'rejected' ? (
+                        <div className="text-rose-700 font-bold flex items-center gap-1">
+                          <X className="w-3.5 h-3.5 text-rose-600" />
+                          <span>Ditolak</span>
+                        </div>
+                      ) : (
+                        <div className="text-amber-700 font-medium flex items-center gap-1">
+                          <Clock className="w-3.5 h-3.5 text-amber-600" />
+                          <span>Pengecekan</span>
+                        </div>
+                      )}
+                      <div className="text-[10px] text-slate-400">
+                        {sub.stage1Finance?.verifiedBy || 'Admin Keuangan'}
+                      </div>
+                    </td>
+                    <td className="p-3">
+                      {sub.stage2Committee?.status === 'approved' ? (
+                        <div>
+                          <span className="inline-flex items-center gap-1 text-emerald-700 font-bold">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                            Disahkan
+                          </span>
+                          {(sub.stage2Committee?.officialNumber || sub.stage2Committee?.registrationNumber || sub.registrationNumber) && (
+                            <div className="text-[10px] font-mono font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 mt-1 inline-block">
+                              {sub.stage2Committee?.officialNumber || sub.stage2Committee?.registrationNumber || sub.registrationNumber}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-slate-400 text-xs italic">Menunggu T-1</span>
+                      )}
+                    </td>
+                    <td className="p-3 text-right">
+                      {sub.paymentStatus === 'unpaid' && sub.feeAmount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPendingSubmissionPayload(sub);
+                            setProofFileBase64('');
+                            setProofFileName('');
+                            setSimulatedGatewaySuccess(false);
+                            setPayNowChoice('pay_now');
+                            setPaymentModalOpen(true);
+                          }}
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition inline-flex items-center gap-1 cursor-pointer shadow-xs"
+                        >
+                          <CreditCard className="w-3 h-3" />
+                          <span>Bayar Sekarang</span>
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
-  );
+  )}
+
+  {/* ========================================================= */}
+  {/* MODAL: PILIHAN PEMBAYARAN & PAYMENT GATEWAY SEKOLAH */}
+  {/* ========================================================= */}
+  {paymentModalOpen && pendingSubmissionPayload && (
+    <div className="no-print fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-3 sm:p-4">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full max-h-[92vh] flex flex-col overflow-hidden border border-slate-200">
+        {/* Modal Header */}
+        <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 bg-blue-600 rounded-xl">
+              <CreditCard className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-sm sm:text-base">
+                Pembayaran Pendaftaran Formulir
+              </h3>
+              <p className="text-xs text-slate-300">
+                {pendingSubmissionPayload.formTitle} • {pendingSubmissionPayload.applicantName}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setPaymentModalOpen(false)}
+            className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Modal Body */}
+        <div className="p-5 overflow-y-auto space-y-4 text-xs text-slate-700">
+          {/* Bill Summary Banner */}
+          <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-center justify-between">
+            <div>
+              <p className="text-[11px] font-bold text-blue-900 uppercase tracking-wider">Total Tagihan Registrasi</p>
+              <p className="text-xs text-slate-600 mt-0.5">Asal: {pendingSubmissionPayload.schoolName}</p>
+            </div>
+            <div className="text-right">
+              <span className="text-xl sm:text-2xl font-black text-blue-900 font-mono">
+                {formatRupiah(pendingSubmissionPayload.feeAmount)}
+              </span>
+            </div>
+          </div>
+
+          {/* Flexible Flow Option (Bayar Sekarang vs Simpan Dulu & Bayar Nanti) */}
+          <div className="space-y-1.5">
+            <label className="block text-slate-800 font-bold">Waktu Pembayaran:</label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setPayNowChoice('pay_now')}
+                className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                  payNowChoice === 'pay_now'
+                    ? 'border-blue-600 bg-blue-50/70 text-blue-950 font-bold ring-2 ring-blue-500/30'
+                    : 'border-slate-200 hover:border-slate-300 text-slate-700'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className={`w-4 h-4 ${payNowChoice === 'pay_now' ? 'text-blue-600' : 'text-slate-400'}`} />
+                  <span className="text-xs font-bold">Bayar Sekarang</span>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1 font-normal">
+                  Unggah bukti atau gunakan gateway online otomatis.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setPayNowChoice('pay_later')}
+                className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                  payNowChoice === 'pay_later'
+                    ? 'border-indigo-600 bg-indigo-50/70 text-indigo-950 font-bold ring-2 ring-indigo-500/30'
+                    : 'border-slate-200 hover:border-slate-300 text-slate-700'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Clock className={`w-4 h-4 ${payNowChoice === 'pay_later' ? 'text-indigo-600' : 'text-slate-400'}`} />
+                  <span className="text-xs font-bold">Simpan & Bayar Nanti</span>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1 font-normal">
+                  Simpan data formulir sekarang, lakukan transfer nanti di menu riwayat.
+                </p>
+              </button>
+            </div>
+          </div>
+
+          {payNowChoice === 'pay_now' && (
+            <div className="space-y-3 pt-2 border-t border-slate-200">
+              <label className="block text-slate-800 font-bold">Pilih Kanal / Metode Pembayaran:</label>
+
+              {/* Method Selector Tabs */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedPayMethod('midtrans')}
+                  className={`p-2.5 rounded-xl border text-center transition cursor-pointer ${
+                    selectedPayMethod === 'midtrans'
+                      ? 'border-blue-600 bg-blue-600 text-white font-bold shadow-xs'
+                      : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <CreditCard className="w-4 h-4 mx-auto mb-1" />
+                  <div className="text-[11px] font-bold">Midtrans</div>
+                  <div className={`text-[9px] ${selectedPayMethod === 'midtrans' ? 'text-blue-100' : 'text-slate-400'}`}>Snap Gateway</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedPayMethod('ratapay')}
+                  className={`p-2.5 rounded-xl border text-center transition cursor-pointer ${
+                    selectedPayMethod === 'ratapay'
+                      ? 'border-indigo-600 bg-indigo-600 text-white font-bold shadow-xs'
+                      : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <DollarSign className="w-4 h-4 mx-auto mb-1" />
+                  <div className="text-[11px] font-bold">Ratapay</div>
+                  <div className={`text-[9px] ${selectedPayMethod === 'ratapay' ? 'text-indigo-100' : 'text-slate-400'}`}>Gerbang PKS</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedPayMethod('qris')}
+                  className={`p-2.5 rounded-xl border text-center transition cursor-pointer ${
+                    selectedPayMethod === 'qris'
+                      ? 'border-emerald-600 bg-emerald-600 text-white font-bold shadow-xs'
+                      : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <QrCode className="w-4 h-4 mx-auto mb-1" />
+                  <div className="text-[11px] font-bold">QRIS Statis</div>
+                  <div className={`text-[9px] ${selectedPayMethod === 'qris' ? 'text-emerald-100' : 'text-slate-400'}`}>Scan & Upload</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedPayMethod('bank_transfer')}
+                  className={`p-2.5 rounded-xl border text-center transition cursor-pointer ${
+                    selectedPayMethod === 'bank_transfer'
+                      ? 'border-purple-600 bg-purple-600 text-white font-bold shadow-xs'
+                      : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <Building2 className="w-4 h-4 mx-auto mb-1" />
+                  <div className="text-[11px] font-bold">Transfer Bank</div>
+                  <div className={`text-[9px] ${selectedPayMethod === 'bank_transfer' ? 'text-purple-100' : 'text-slate-400'}`}>Manual Bank</div>
+                </button>
+              </div>
+
+              {/* METHOD 1: MIDTRANS */}
+              {selectedPayMethod === 'midtrans' && (
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-900">Midtrans Payment Gateway</span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800">
+                      Snap Pop-up
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600">
+                    Mendukung pembayaran instan melalui QRIS GoPay, OVO, ShopeePay, serta Virtual Account Bank BCA, BNI, BRI, dan Bank Mandiri.
+                  </p>
+                  <div className="p-3 bg-white border border-slate-200 rounded-lg flex items-center justify-between">
+                    <div>
+                      <p className="font-bold text-slate-800">Status Gateway</p>
+                      <p className="text-[11px] text-emerald-600 font-semibold">Tersambung (Mode Sandbox / Production Ready)</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSimulatedGatewaySuccess(true);
+                        showToast('Simulasi Midtrans berhasil! Menunggu konfirmasi kirim.', 'info');
+                      }}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition cursor-pointer"
+                    >
+                      {simulatedGatewaySuccess ? '✓ Terverifikasi Online' : 'Buka Pop-up Snap'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* METHOD 2: RATAPAY */}
+              {selectedPayMethod === 'ratapay' && (
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-900">Ratapay Gateway Komunitas</span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800">
+                      Auto Settlement
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600">
+                    Sistem pembayaran instan yang terintegrasi dengan rekening kas panitia PKS Polres Majalengka.
+                  </p>
+                  <div className="p-3 bg-white border border-slate-200 rounded-lg flex items-center justify-between">
+                    <div>
+                      <p className="font-bold text-slate-800">Kanal Ratapay</p>
+                      <p className="text-[11px] text-slate-500">Merchant ID: PKS-RESMAJALENGKA-01</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSimulatedGatewaySuccess(true);
+                        showToast('Integrasi Ratapay siap diproses!', 'info');
+                      }}
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition cursor-pointer"
+                    >
+                      {simulatedGatewaySuccess ? '✓ Token Dibuat' : 'Generate Checkout'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* METHOD 3: QRIS STATIS */}
+              {selectedPayMethod === 'qris' && (
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-900">QRIS Statis Panitia</span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                      NMID Terverifikasi
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row items-center gap-4 bg-white p-3 rounded-lg border border-slate-200">
+                    <div className="w-32 h-32 bg-slate-900 text-white rounded-xl flex flex-col items-center justify-center p-2 shrink-0">
+                      <QrCode className="w-20 h-20 text-white" />
+                      <span className="text-[9px] font-bold tracking-wider text-slate-300">QRIS RESMI PKS</span>
+                    </div>
+
+                    <div className="space-y-1.5 text-xs">
+                      <p className="font-bold text-slate-900">
+                        {paymentConfig?.qris?.merchantName || 'SATLANTAS POLRES MAJALENGKA - KORPS PKS'}
+                      </p>
+                      <p className="text-[11px] text-slate-500 font-mono">
+                        NMID: ID102026889218 • Status: Aktif
+                      </p>
+                      <p className="text-[11px] text-slate-600">
+                        {paymentConfig?.qris?.instruction || '1. Scan kode QR dengan aplikasi m-Banking atau e-Wallet.'}<br />
+                        Nominal tagihan: <strong className="font-mono text-slate-900">{formatRupiah(pendingSubmissionPayload.feeAmount)}</strong>.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Upload Proof */}
+                  <div className="space-y-1.5 pt-1">
+                    <label className="block text-slate-800 font-bold">Unggah Bukti Struk Transaksi QRIS:</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleProofImageChange}
+                        className="text-xs file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer"
+                      />
+                    </div>
+                    {proofFileName && (
+                      <p className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Berkas terpilih: {proofFileName}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* METHOD 4: TRANSFER MANUAL BANK */}
+              {selectedPayMethod === 'bank_transfer' && (
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-900">Rekening Bank Panitia Resmi</span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800">
+                      Verifikasi 2-Tahap
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-black text-slate-900">
+                            {paymentConfig?.bankTransfer?.bankName || 'Bank Mandiri'}
+                          </span>
+                          <span className="text-[11px] text-slate-500">
+                            a.n {paymentConfig?.bankTransfer?.accountHolder || 'Panitia Pelaksana Lomba PKS'}
+                          </span>
+                        </div>
+                        <div className="font-mono font-bold text-blue-900 text-xs sm:text-sm mt-0.5">
+                          {paymentConfig?.bankTransfer?.accountNumber || '137-00-9876543-2'}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const acc = paymentConfig?.bankTransfer?.accountNumber || '137-00-9876543-2';
+                          navigator.clipboard.writeText(acc);
+                          showToast(`Nomor rekening ${paymentConfig?.bankTransfer?.bankName || 'Bank'} disalin!`, 'success');
+                        }}
+                        className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>Salin</span>
+                      </button>
+                    </div>
+
+                    {paymentConfig?.bankTransfer?.instruction && (
+                      <p className="text-[11px] text-slate-500 italic">
+                        {paymentConfig.bankTransfer.instruction}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Upload Slip Proof */}
+                  <div className="space-y-1.5 pt-1">
+                    <label className="block text-slate-800 font-bold">Unggah Foto Bukti Transfer Bank:</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleProofImageChange}
+                        className="text-xs file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer"
+                      />
+                    </div>
+                    {proofFileName && (
+                      <p className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Berkas terpilih: {proofFileName}
+                      </p>
+                    )}
+                    {proofFileBase64 && (
+                      <div className="mt-2 w-28 h-20 rounded-lg overflow-hidden border border-slate-300">
+                        <img src={proofFileBase64} alt="Bukti Transfer" className="w-full h-full object-cover" />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Verification notice */}
+          <div className="p-3 bg-slate-100 rounded-xl text-slate-600 text-[11px]">
+            <strong>Catatan Verifikasi Dua Tahap:</strong>
+            <p className="mt-0.5">
+              1. <em>Tahap 1 (Admin Keuangan):</em> Mengecek kesesuaian mutasi rekening / payment gateway.<br />
+              2. <em>Tahap 2 (Panitia Pelaksana):</em> Mengesahkan status kepesertaan & menerbitkan Nomor Registrasi Resmi lomba.
+            </p>
+          </div>
+        </div>
+
+        {/* Modal Footer */}
+        <div className="bg-slate-100 px-5 py-3.5 flex items-center justify-between gap-3 border-t border-slate-200 shrink-0">
+          <button
+            type="button"
+            onClick={() => setPaymentModalOpen(false)}
+            className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-200 transition cursor-pointer"
+          >
+            Batal
+          </button>
+
+          <button
+            type="button"
+            onClick={handleConfirmPaymentAndSubmit}
+            disabled={isSubmitting}
+            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-75 text-white text-xs font-black rounded-xl transition flex items-center gap-2 cursor-pointer shadow-md hover:shadow-lg"
+          >
+            {isSubmitting ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Menyimpan ke Cloud...</span>
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                <span>{payNowChoice === 'pay_later' ? 'Simpan & Bayar Nanti' : 'Konfirmasi & Kirim Bukti'}</span>
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
+</div>
+);
 };

@@ -62,9 +62,12 @@ import {
   Cloud,
   RefreshCw,
   Power,
-  ShieldAlert
+  ShieldAlert,
+  CreditCard
 } from 'lucide-react';
 import { RegistrationFormsView } from './components/RegistrationFormsView';
+import { RegistrationSubmissionsAdminView } from './components/RegistrationSubmissionsAdminView';
+import { PaymentGatewaySettingsModal } from './components/PaymentGatewaySettingsModal';
 import { LogoSettingModal } from './components/LogoSettingModal';
 import { SchoolAccountManagerModal } from './components/SchoolAccountManagerModal';
 import { CloudSyncModal } from './components/CloudSyncModal';
@@ -84,7 +87,14 @@ import {
   saveLogoToCloud,
   subscribeToAppStatus,
   saveAppStatusToCloud,
-  AppStatusConfig
+  AppStatusConfig,
+  subscribeToPaymentConfig,
+  savePaymentConfigToCloud,
+  subscribeToRegistrations,
+  saveRegistrationToCloud,
+  PaymentConfig,
+  DEFAULT_PAYMENT_CONFIG,
+  RegistrationSubmission
 } from './lib/firebase';
 
 // ==========================================
@@ -803,6 +813,11 @@ export default function App() {
   });
   const [modalStatusOpen, setModalStatusOpen] = useState(false);
 
+  // Payment Gateway & School Registration Submissions State
+  const [paymentConfig, setPaymentConfig] = useState<PaymentConfig>(DEFAULT_PAYMENT_CONFIG);
+  const [registrationsList, setRegistrationsList] = useState<RegistrationSubmission[]>([]);
+  const [modalPaymentSettingsOpen, setModalPaymentSettingsOpen] = useState(false);
+
   // School Self-Registration State (Layar Login)
   const [authViewTab, setAuthViewTab] = useState<'login' | 'register_sekolah'>('login');
   const [regJenjang, setRegJenjang] = useState<SchoolLevel>('SLTP');
@@ -929,6 +944,8 @@ export default function App() {
     let unsubConfig: (() => void) | undefined;
     let unsubLogo: (() => void) | undefined;
     let unsubStatus: (() => void) | undefined;
+    let unsubPayment: (() => void) | undefined;
+    let unsubRegistrations: (() => void) | undefined;
 
     const initCloud = async () => {
       try {
@@ -1047,6 +1064,26 @@ export default function App() {
           err => console.error('Cloud app status sync error:', err)
         );
 
+        // 6. Subscribe to Payment Configuration & Gateways
+        unsubPayment = subscribeToPaymentConfig(
+          cloudPaymentConfig => {
+            if (cloudPaymentConfig) {
+              setPaymentConfig(cloudPaymentConfig);
+            }
+          },
+          err => console.error('Cloud payment config sync error:', err)
+        );
+
+        // 7. Subscribe to School Registration Submissions
+        unsubRegistrations = subscribeToRegistrations(
+          cloudSubmissions => {
+            if (cloudSubmissions) {
+              setRegistrationsList(cloudSubmissions);
+            }
+          },
+          err => console.error('Cloud registrations sync error:', err)
+        );
+
         isInitialCloudSyncDone.current = true;
       } catch (err) {
         console.error('Cloud initialization failed:', err);
@@ -1062,6 +1099,8 @@ export default function App() {
       if (unsubConfig) unsubConfig();
       if (unsubLogo) unsubLogo();
       if (unsubStatus) unsubStatus();
+      if (unsubPayment) unsubPayment();
+      if (unsubRegistrations) unsubRegistrations();
     };
   }, []);
 
@@ -4191,6 +4230,36 @@ export default function App() {
               {isAdminRole && (
                 <>
                   <button
+                    onClick={() => {
+                      setCurrentTab('rekap_pendaftaran');
+                      setSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer font-bold ${
+                      currentTab === 'rekap_pendaftaran'
+                        ? 'bg-blue-600 text-white shadow'
+                        : 'text-blue-400 hover:text-blue-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                      {!sidebarCollapsed && <span className="truncate">Rekap Pendaftaran Sekolah</span>}
+                    </div>
+                    {!sidebarCollapsed && registrationsList.length > 0 && (
+                      <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-blue-500/30 text-blue-200">
+                        {registrationsList.length}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => setModalPaymentSettingsOpen(true)}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-amber-400 hover:text-amber-300 hover:bg-slate-800 transition cursor-pointer font-bold"
+                  >
+                    <CreditCard className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Tarif Biaya & Payment Gateway</span>}
+                  </button>
+
+                  <button
                     onClick={() => setModalSchoolAccountsOpen(true)}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-emerald-400 hover:text-emerald-300 hover:bg-slate-800 transition cursor-pointer font-bold"
                   >
@@ -6075,6 +6144,9 @@ export default function App() {
             currentTab={currentTab}
             setCurrentTab={setCurrentTab}
             appLogo={appLogo}
+            currentUser={currentUser}
+            paymentConfig={paymentConfig}
+            submissionsList={registrationsList}
             formPolisiPelajar={formPolisiPelajar}
             setFormPolisiPelajar={setFormPolisiPelajar}
             handleExportFormPolisiPelajarExcel={handleExportFormPolisiPelajarExcel}
@@ -6088,6 +6160,19 @@ export default function App() {
             setFormBalok2={setFormBalok2}
             handleExportFormBalok2Excel={handleExportFormBalok2Excel}
             showToast={showToast}
+          />
+        )}
+
+        {/* ==================================================== */}
+        {/* TAB ADMIN: REKAPITULASI PENDAFTARAN SEKOLAH MANDIRI */}
+        {/* ==================================================== */}
+        {currentTab === 'rekap_pendaftaran' && (
+          <RegistrationSubmissionsAdminView
+            submissionsList={registrationsList}
+            paymentConfig={paymentConfig}
+            currentUser={currentUser}
+            showToast={showToast}
+            onOpenPaymentSettings={() => setModalPaymentSettingsOpen(true)}
           />
         )}
       </main>
@@ -8007,6 +8092,27 @@ export default function App() {
         onSaveStatus={handleSaveAppStatus}
         showToast={showToast}
         appLogo={appLogo}
+      />
+
+      {/* ==================================================== */}
+      {/* MODAL: PENGATURAN BIAYA FORMULIR & PAYMENT GATEWAY */}
+      {/* ==================================================== */}
+      <PaymentGatewaySettingsModal
+        isOpen={modalPaymentSettingsOpen}
+        onClose={() => setModalPaymentSettingsOpen(false)}
+        paymentConfig={paymentConfig}
+        onSave={async (newCfg: PaymentConfig) => {
+          const res = await savePaymentConfigToCloud(newCfg);
+          if (res.success) {
+            setPaymentConfig(newCfg);
+            showToast('Pengaturan tarif & payment gateway berhasil disimpan ke Cloud!', 'success');
+            return true;
+          } else {
+            showToast(`Gagal menyimpan ke Cloud: ${res.error}`, 'error');
+            return false;
+          }
+        }}
+        showToast={showToast}
       />
 
       {/* ==================================================== */}

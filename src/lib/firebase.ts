@@ -415,3 +415,196 @@ export async function saveAppStatusToCloud(status: AppStatusConfig): Promise<{ s
     return { success: false, error: errInfo.error };
   }
 }
+
+// 7. PAYMENT GATEWAY & REGISTRATION FEE CONFIGURATION
+export interface FormFeeConfig {
+  fee: number;
+  isFree: boolean;
+  description: string;
+}
+
+export interface PaymentConfig {
+  id?: string;
+  formFees: {
+    polisi_pelajar: FormFeeConfig;
+    calon_pks: FormFeeConfig;
+    kemah_balok1: FormFeeConfig;
+    pks_balok2: FormFeeConfig;
+  };
+  midtrans: {
+    enabled: boolean;
+    isProduction: boolean;
+    clientKey: string;
+    serverKey: string;
+    merchantId: string;
+  };
+  ratapay: {
+    enabled: boolean;
+    apiKey: string;
+    merchantCode: string;
+  };
+  qris: {
+    enabled: boolean;
+    merchantName: string;
+    qrisImageUrl: string;
+    instruction: string;
+  };
+  bankTransfer: {
+    enabled: boolean;
+    bankName: string;
+    accountNumber: string;
+    accountHolder: string;
+    instruction: string;
+  };
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export const DEFAULT_PAYMENT_CONFIG: PaymentConfig = {
+  id: 'payment_config',
+  formFees: {
+    polisi_pelajar: {
+      fee: 50000,
+      isFree: false,
+      description: 'Biaya registrasi seleksi, uji fisik, dan penerbitan lencana Polisi Pelajar'
+    },
+    calon_pks: {
+      fee: 45000,
+      isFree: false,
+      description: 'Biaya pendaftaran seleksi calon anggota & modul diklat dasar PKS'
+    },
+    kemah_balok1: {
+      fee: 150000,
+      isFree: false,
+      description: 'Biaya perkemahan pelantikan tingkat Balok 1 (Tenda, konsumsi, atribut)'
+    },
+    pks_balok2: {
+      fee: 75000,
+      isFree: false,
+      description: 'Biaya ujian komprehensif kepangkatan Balok 2 & sertifikasi Satlantas'
+    }
+  },
+  midtrans: {
+    enabled: true,
+    isProduction: false,
+    clientKey: 'SB-Mid-client-demoPKS2026',
+    serverKey: 'SB-Mid-server-demoPKS2026',
+    merchantId: 'M-PKS2026'
+  },
+  ratapay: {
+    enabled: true,
+    apiKey: 'RATA-API-KEY-PKS2026',
+    merchantCode: 'PKS-MAJALENGKA-01'
+  },
+  qris: {
+    enabled: true,
+    merchantName: 'PANITIA LOMBA PKS POLRES',
+    qrisImageUrl: '',
+    instruction: 'Scan QRIS resmi panitia menggunakan m-Banking (BCA, Mandiri, BRI, BNI) atau dompet digital (GoPay, OVO, Dana, ShopeePay).'
+  },
+  bankTransfer: {
+    enabled: true,
+    bankName: 'Bank Mandiri',
+    accountNumber: '137-00-9876543-2',
+    accountHolder: 'Panitia Pelaksana Lomba PBB PKS',
+    instruction: 'Transfer sesuai nominal tagihan pendaftaran. Sertakan berita acara: "[Jenis Form] - [Asal Sekolah]". Simpan dan unggah struk bukti transfer.'
+  }
+};
+
+export interface VerificationStage {
+  status: 'pending' | 'approved' | 'rejected';
+  verifiedBy?: string;
+  verifiedAt?: string;
+  note?: string;
+  officialNumber?: string;
+  registrationNumber?: string;
+}
+
+export interface RegistrationSubmission {
+  id: string;
+  formType: 'polisi_pelajar' | 'calon_pks' | 'kemah_balok1' | 'pks_balok2';
+  formTitle: string;
+  schoolName: string;
+  schoolUsername: string;
+  schoolLevel: 'SLTP' | 'SLTA';
+  applicantName: string;
+  contactWa: string;
+  formData: Record<string, any>;
+  feeAmount: number;
+  paymentMethod: 'midtrans' | 'ratapay' | 'qris' | 'bank_transfer' | 'free';
+  paymentStatus: 'unpaid' | 'pending_verification' | 'paid' | 'rejected';
+  paymentProofUrl?: string;
+  paymentProofFileName?: string;
+  paymentDate?: string;
+  paymentReference?: string;
+  registrationNumber?: string;
+  stage1Finance: VerificationStage;
+  stage2Committee: VerificationStage;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function subscribeToPaymentConfig(
+  onUpdate: (config: PaymentConfig) => void,
+  onError?: (err: any) => void
+) {
+  const path = 'settings/payment_config';
+  return onSnapshot(
+    doc(db, 'settings', 'payment_config'),
+    docSnap => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        onUpdate({
+          id: 'payment_config',
+          formFees: {
+            polisi_pelajar: data.formFees?.polisi_pelajar || DEFAULT_PAYMENT_CONFIG.formFees.polisi_pelajar,
+            calon_pks: data.formFees?.calon_pks || DEFAULT_PAYMENT_CONFIG.formFees.calon_pks,
+            kemah_balok1: data.formFees?.kemah_balok1 || DEFAULT_PAYMENT_CONFIG.formFees.kemah_balok1,
+            pks_balok2: data.formFees?.pks_balok2 || DEFAULT_PAYMENT_CONFIG.formFees.pks_balok2
+          },
+          midtrans: {
+            ...DEFAULT_PAYMENT_CONFIG.midtrans,
+            ...(data.midtrans || {})
+          },
+          ratapay: {
+            ...DEFAULT_PAYMENT_CONFIG.ratapay,
+            ...(data.ratapay || {})
+          },
+          qris: {
+            ...DEFAULT_PAYMENT_CONFIG.qris,
+            ...(data.qris || {})
+          },
+          bankTransfer: {
+            ...DEFAULT_PAYMENT_CONFIG.bankTransfer,
+            ...(data.bankTransfer || {})
+          },
+          updatedAt: data.updatedAt || '',
+          updatedBy: data.updatedBy || ''
+        });
+      } else {
+        onUpdate(DEFAULT_PAYMENT_CONFIG);
+      }
+    },
+    error => {
+      handleFirestoreError(error, OperationType.GET, path);
+      if (onError) onError(error);
+    }
+  );
+}
+
+export async function savePaymentConfigToCloud(config: PaymentConfig): Promise<{ success: boolean; error?: string }> {
+  const path = 'settings/payment_config';
+  try {
+    const cleanDoc = sanitizeForFirestore({
+      ...config,
+      id: 'payment_config',
+      updatedAt: new Date().toISOString()
+    });
+    await setDoc(doc(db, 'settings', 'payment_config'), cleanDoc);
+    return { success: true };
+  } catch (error) {
+    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
+    return { success: false, error: errInfo.error };
+  }
+}
+
