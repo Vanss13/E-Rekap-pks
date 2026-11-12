@@ -2549,23 +2549,63 @@ export default function App() {
         return (a.nomor || '').localeCompare(b.nomor || '');
       });
 
-      // Top 3 Podium Kategori
-      const topThree = fullLeaderboard
-        .filter(item => item.catSummary.isComplete && item.catRank !== null && item.catRank <= 3)
+      // Top 3 Podium Kategori SLTP (Mandiri)
+      const topThreeSLTP = fullLeaderboard
+        .filter(item => (item.jenjang || 'SLTP') === 'SLTP' && item.catSummary.isComplete && item.jenjangCatRank !== null && item.jenjangCatRank <= 3)
+        .sort((a, b) => (a.jenjangCatRank || 99) - (b.jenjangCatRank || 99))
         .slice(0, 3)
         .map(item => ({
           participant: item.participantObj,
-          rank: item.catRank!,
+          rank: item.jenjangCatRank!,
           score: item.catSummary.sum,
           pct: item.catSummary.pct
         }));
 
+      // Top 3 Podium Kategori SLTA (Mandiri)
+      const topThreeSLTA = fullLeaderboard
+        .filter(item => item.jenjang === 'SLTA' && item.catSummary.isComplete && item.jenjangCatRank !== null && item.jenjangCatRank <= 3)
+        .sort((a, b) => (a.jenjangCatRank || 99) - (b.jenjangCatRank || 99))
+        .slice(0, 3)
+        .map(item => ({
+          participant: item.participantObj,
+          rank: item.jenjangCatRank!,
+          score: item.catSummary.sum,
+          pct: item.catSummary.pct
+        }));
+
+      // Separate sorted leaderboards for SLTP and SLTA
+      const leaderboardSLTP = fullLeaderboard
+        .filter(item => (item.jenjang || 'SLTP') === 'SLTP')
+        .sort((a, b) => {
+          if (a.catSummary.isComplete && b.catSummary.isComplete) {
+            return (a.jenjangCatRank || 999) - (b.jenjangCatRank || 999);
+          }
+          if (a.catSummary.isComplete) return -1;
+          if (b.catSummary.isComplete) return 1;
+          return (a.nomor || '').localeCompare(b.nomor || '');
+        });
+
+      const leaderboardSLTA = fullLeaderboard
+        .filter(item => item.jenjang === 'SLTA')
+        .sort((a, b) => {
+          if (a.catSummary.isComplete && b.catSummary.isComplete) {
+            return (a.jenjangCatRank || 999) - (b.jenjangCatRank || 999);
+          }
+          if (a.catSummary.isComplete) return -1;
+          if (b.catSummary.isComplete) return 1;
+          return (a.nomor || '').localeCompare(b.nomor || '');
+        });
+
       result[cat.key] = {
         category: cat,
         leaderboard: fullLeaderboard,
+        leaderboardSLTP,
+        leaderboardSLTA,
         rankMap,
         jenjangRankMap,
-        topThree
+        topThreeSLTP,
+        topThreeSLTA,
+        topThree: topThreeSLTP
       };
     });
 
@@ -2612,7 +2652,7 @@ export default function App() {
     const rankMap = new Map<string, number>();
     qualifiedList.forEach((c: any) => rankMap.set(c.id, c.rank));
 
-    // Peringkat Juara Umum Khusus Jenjang (SLTP dan SLTA)
+    // Peringkat Juara Umum Khusus Jenjang (SLTP dan SLTA Mandiri)
     const sltpQualified = qualifiedList.filter(item => (item.jenjang || 'SLTP') === 'SLTP');
     let sltpR = 1;
     for (let i = 0; i < sltpQualified.length; i++) {
@@ -2643,7 +2683,13 @@ export default function App() {
 
     withRank.sort((a, b) => {
       if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
-        return (a.rank || 999) - (b.rank || 999);
+        if (jenjangFilter !== 'all') {
+          return (a.jenjangRank || 999) - (b.jenjangRank || 999);
+        }
+        if ((a.jenjang || 'SLTP') !== (b.jenjang || 'SLTP')) {
+          return (a.jenjang || 'SLTP') === 'SLTP' ? -1 : 1;
+        }
+        return (a.jenjangRank || 999) - (b.jenjangRank || 999);
       }
       if (a.calc.mandatoryCompleted) return -1;
       if (b.calc.mandatoryCompleted) return 1;
@@ -2672,7 +2718,14 @@ export default function App() {
     const catData = allCategoriesRankings[targetCat.key];
     if (!catData) return [];
 
-    return catData.leaderboard.filter(item => {
+    const source =
+      jenjangFilter === 'SLTP'
+        ? catData.leaderboardSLTP
+        : jenjangFilter === 'SLTA'
+        ? catData.leaderboardSLTA
+        : catData.leaderboard;
+
+    return source.filter(item => {
       const q = searchQuery.toLowerCase().trim();
       const matchSearch =
         item.nomor.toLowerCase().includes(q) ||
@@ -2690,18 +2743,12 @@ export default function App() {
   // EXPORT EXCEL FUNCTIONS (JUARA UMUM & PER-KATEGORI LOMBA)
   // ============================================================
 
-  // 1. Ekspor Rekap Juara Umum
-  const handleExportExcelJuaraUmum = () => {
-    if (pesertaList.length === 0) {
-      showToast('Belum ada data peserta untuk diekspor!', 'error');
-      return;
-    }
-
-    const rows = overallStandingsData.map((item, index) => {
+  // Helper Pembuat Baris Excel Klasemen Juara Umum
+  const buildJuaraUmumExcelRows = (items: typeof overallStandingsData, jenjangLabel: string) => {
+    return items.map((item, index) => {
       const rowObj: Record<string, any> = {
         'No': index + 1,
-        'Peringkat Juara Umum': item.rank ? `Juara ${item.rank}` : 'Belum Lengkap',
-        'Peringkat Jenjang': item.jenjangRank ? `Juara ${item.jenjangRank} ${item.jenjang || 'SLTP'}` : '-',
+        'Peringkat Juara Umum': item.jenjangRank ? `Juara ${item.jenjangRank} ${jenjangLabel}` : 'Belum Lengkap',
         'No. Peserta': item.nomor,
         'Tingkat': item.jenjang || 'SLTP',
         'Nama Peleton': item.peleton || '-',
@@ -2712,7 +2759,7 @@ export default function App() {
 
       categories.forEach(cat => {
         const sum = item.calc.categorySummaries[cat.key]?.sum || 0;
-        const cRank = item.catRanks[cat.key]?.rank;
+        const cRank = item.catRanks[cat.key]?.jenjangRank;
         rowObj[`${cat.title} (${cat.maxPoints})`] = sum;
         rowObj[`Peringkat ${cat.shortTitle}`] = cRank ? `Rank ${cRank}` : '-';
       });
@@ -2725,28 +2772,58 @@ export default function App() {
 
       return rowObj;
     });
-
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Rekap Juara Umum');
-    XLSX.writeFile(workbook, `Rekap_Juara_Umum_Lomba_PBB_PKS_${new Date().toISOString().slice(0, 10)}.xlsx`);
-    showToast('Laporan Juara Umum Excel berhasil diunduh.');
   };
 
-  // 2. Ekspor Rekap Peringkat Kategori Spesifik
-  const handleExportExcelKategoriSpesifik = (catKey: CategoryKey) => {
-    const targetCat = categories.find(c => c.key === catKey);
-    if (!targetCat || pesertaList.length === 0) return;
+  // 1. Ekspor Rekap Juara Umum (Multi-Sheet: Sheet SLTP dan Sheet SLTA Terpisah)
+  const handleExportExcelJuaraUmum = () => {
+    if (pesertaList.length === 0) {
+      showToast('Belum ada data peserta untuk diekspor!', 'error');
+      return;
+    }
 
-    const catData = allCategoriesRankings[targetCat.key];
-    const sourceList = catData ? catData.leaderboard : [];
+    const sltpItems = overallStandingsData
+      .filter(item => (item.jenjang || 'SLTP') === 'SLTP')
+      .sort((a, b) => {
+        if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+          return (a.jenjangRank || 999) - (b.jenjangRank || 999);
+        }
+        if (a.calc.mandatoryCompleted) return -1;
+        if (b.calc.mandatoryCompleted) return 1;
+        return (a.nomor || '').localeCompare(b.nomor || '');
+      });
 
-    const rows = sourceList.map((item, index) => {
-      const activeRank = jenjangFilter !== 'all' ? item.jenjangCatRank : item.catRank;
+    const sltaItems = overallStandingsData
+      .filter(item => item.jenjang === 'SLTA')
+      .sort((a, b) => {
+        if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+          return (a.jenjangRank || 999) - (b.jenjangRank || 999);
+        }
+        if (a.calc.mandatoryCompleted) return -1;
+        if (b.calc.mandatoryCompleted) return 1;
+        return (a.nomor || '').localeCompare(b.nomor || '');
+      });
+
+    const workbook = XLSX.utils.book_new();
+
+    // Sheet 1: Juara Umum SLTP
+    const wsSltp = XLSX.utils.json_to_sheet(buildJuaraUmumExcelRows(sltpItems, 'SLTP'));
+    XLSX.utils.book_append_sheet(workbook, wsSltp, 'Juara Umum SLTP');
+
+    // Sheet 2: Juara Umum SLTA
+    const wsSlta = XLSX.utils.json_to_sheet(buildJuaraUmumExcelRows(sltaItems, 'SLTA'));
+    XLSX.utils.book_append_sheet(workbook, wsSlta, 'Juara Umum SLTA');
+
+    XLSX.writeFile(workbook, `Rekap_Juara_Umum_SLTP_dan_SLTA_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    showToast('Laporan Juara Umum Excel (Sheet SLTP & SLTA terpisah) berhasil diunduh.');
+  };
+
+  // Helper Pembuat Baris Excel Kategori
+  const buildKategoriExcelRows = (items: any[], targetCat: any, jenjangLabel: string) => {
+    return items.map((item, index) => {
+      const activeRank = item.jenjangCatRank;
       const rowObj: Record<string, any> = {
         'No': index + 1,
-        'Peringkat Kategori': item.catRank ? `Juara ${item.catRank}` : 'Belum Lengkap',
-        'Peringkat Jenjang': item.jenjangCatRank ? `Juara ${item.jenjangCatRank} (${item.jenjang})` : '-',
+        'Peringkat Kategori': activeRank ? `Juara ${activeRank} (${jenjangLabel})` : 'Belum Lengkap',
         'No. Peserta': item.nomor,
         'Tingkat': item.jenjang || 'SLTP',
         'Nama Peleton': item.peleton || '-',
@@ -2755,10 +2832,9 @@ export default function App() {
         'Juri Penilai': item.juri
       };
 
-      // Tambahkan rincian nilai tiap butir kriteria
-      targetCat.criteria.forEach(crit => {
+      targetCat.criteria.forEach((crit: any) => {
         const val = item.catScores[crit.no];
-        rowObj[`K${crit.no}. ${crit.name} (Max ${crit.weights[4]})`] = val !== undefined ? val : '-';
+        rowObj[`K${crit.no}. ${crit.name} (Max ${crit.weights[4]})`] = val !== undefined && val !== null ? val : '-';
       });
 
       rowObj[`TOTAL NILAI ${targetCat.shortTitle.toUpperCase()} (Max ${targetCat.maxPoints})`] = item.catSummary.sum;
@@ -2767,16 +2843,30 @@ export default function App() {
 
       return rowObj;
     });
-
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    const sheetName = `Juara ${targetCat.shortTitle}`.slice(0, 30);
-    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
-    XLSX.writeFile(workbook, `Rekap_Juara_${targetCat.shortTitle.replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.xlsx`);
-    showToast(`Laporan Peringkat ${targetCat.title} berhasil diunduh.`);
   };
 
-  // 3. Ekspor Buku Rekap Lengkap (Multi-Sheet: Setiap Kategori di Sheet Terpisah + Juara Umum)
+  // 2. Ekspor Rekap Peringkat Kategori Spesifik (Multi-Sheet: Sheet SLTP dan Sheet SLTA Terpisah)
+  const handleExportExcelKategoriSpesifik = (catKey: CategoryKey) => {
+    const targetCat = categories.find(c => c.key === catKey);
+    if (!targetCat || pesertaList.length === 0) return;
+
+    const catData = allCategoriesRankings[targetCat.key];
+    const sltpList = catData ? catData.leaderboardSLTP : [];
+    const sltaList = catData ? catData.leaderboardSLTA : [];
+
+    const workbook = XLSX.utils.book_new();
+
+    const wsSltp = XLSX.utils.json_to_sheet(buildKategoriExcelRows(sltpList, targetCat, 'SLTP'));
+    XLSX.utils.book_append_sheet(workbook, wsSltp, `${targetCat.shortTitle} SLTP`.slice(0, 30));
+
+    const wsSlta = XLSX.utils.json_to_sheet(buildKategoriExcelRows(sltaList, targetCat, 'SLTA'));
+    XLSX.utils.book_append_sheet(workbook, wsSlta, `${targetCat.shortTitle} SLTA`.slice(0, 30));
+
+    XLSX.writeFile(workbook, `Rekap_Juara_${targetCat.shortTitle.replace(/\s+/g, '_')}_SLTP_SLTA_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    showToast(`Laporan Peringkat ${targetCat.title} (Sheet SLTP & SLTA) berhasil diunduh.`);
+  };
+
+  // 3. Ekspor Buku Rekap Lengkap (Multi-Sheet: Sheet Juara Umum SLTP & SLTA + Podium SLTP & SLTA + Kategori)
   const handleExportExcelMasterWorkbook = () => {
     if (pesertaList.length === 0) {
       showToast('Belum ada data peserta untuk diekspor!', 'error');
@@ -2785,79 +2875,100 @@ export default function App() {
 
     const workbook = XLSX.utils.book_new();
 
-    // SHEET 1: REKAP KLASEMEN JUARA UMUM
-    const rowsUmum = overallStandingsData.map((item, index) => {
-      const rowObj: Record<string, any> = {
-        'No': index + 1,
-        'Peringkat Juara Umum': item.rank ? `Juara ${item.rank}` : 'Belum Lengkap',
-        'Peringkat Jenjang': item.jenjangRank ? `Juara ${item.jenjangRank} ${item.jenjang}` : '-',
-        'No. Peserta': item.nomor,
-        'Tingkat': item.jenjang || 'SLTP',
-        'Nama Peleton': item.peleton || '-',
-        'Nama Sekolah': item.sekolah
-      };
-      categories.forEach(cat => {
-        const cRank = item.catRanks[cat.key]?.rank;
-        rowObj[`${cat.shortTitle} (Poin)`] = item.calc.categorySummaries[cat.key]?.sum || 0;
-        rowObj[`${cat.shortTitle} (Rank)`] = cRank ? `#${cRank}` : '-';
+    // 1. Sheet Juara Umum SLTP
+    const sltpOverall = overallStandingsData
+      .filter(item => (item.jenjang || 'SLTP') === 'SLTP')
+      .sort((a, b) => {
+        if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+          return (a.jenjangRank || 999) - (b.jenjangRank || 999);
+        }
+        if (a.calc.mandatoryCompleted) return -1;
+        if (b.calc.mandatoryCompleted) return 1;
+        return (a.nomor || '').localeCompare(b.nomor || '');
       });
-      rowObj['TOTAL NILAI'] = item.calc.grandTotal;
-      rowObj['Persentase (%)'] = Number(item.calc.grandPct.toFixed(2));
-      rowObj['Status'] = item.calc.mandatoryCompleted ? 'Lengkap' : 'Belum Lengkap';
-      return rowObj;
-    });
-    const wsUmum = XLSX.utils.json_to_sheet(rowsUmum);
-    XLSX.utils.book_append_sheet(workbook, wsUmum, 'Rekap Juara Umum');
+    const wsUmumSltp = XLSX.utils.json_to_sheet(buildJuaraUmumExcelRows(sltpOverall, 'SLTP'));
+    XLSX.utils.book_append_sheet(workbook, wsUmumSltp, 'Juara Umum SLTP');
 
-    // SHEET 2: RINGKASAN JUARA PER KATEGORI (PODIUM JUARA 1, 2, 3 TIAP LOMBA)
-    const rowsRingkasanJuara = categories.map((cat, idx) => {
+    // 2. Sheet Juara Umum SLTA
+    const sltaOverall = overallStandingsData
+      .filter(item => item.jenjang === 'SLTA')
+      .sort((a, b) => {
+        if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+          return (a.jenjangRank || 999) - (b.jenjangRank || 999);
+        }
+        if (a.calc.mandatoryCompleted) return -1;
+        if (b.calc.mandatoryCompleted) return 1;
+        return (a.nomor || '').localeCompare(b.nomor || '');
+      });
+    const wsUmumSlta = XLSX.utils.json_to_sheet(buildJuaraUmumExcelRows(sltaOverall, 'SLTA'));
+    XLSX.utils.book_append_sheet(workbook, wsUmumSlta, 'Juara Umum SLTA');
+
+    // 3. Sheet Podium Juara Kategori SLTP
+    const rowsPodiumSltp = categories.map((cat, idx) => {
       const catData = allCategoriesRankings[cat.key];
-      const j1 = catData?.topThree.find(t => t.rank === 1);
-      const j2 = catData?.topThree.find(t => t.rank === 2);
-      const j3 = catData?.topThree.find(t => t.rank === 3);
+      const j1 = catData?.topThreeSLTP.find(t => t.rank === 1);
+      const j2 = catData?.topThreeSLTP.find(t => t.rank === 2);
+      const j3 = catData?.topThreeSLTP.find(t => t.rank === 3);
 
       return {
         'No': idx + 1,
+        'Tingkat': 'SLTP',
         'Kategori Mata Lomba': cat.title,
         'Nama Singkat': cat.shortTitle,
         'Nilai Maksimal': `${cat.maxPoints} Poin`,
-        'Jumlah Kriteria': `${cat.criteria.length} Butir`,
-        'Juara 1 (Emas)': j1 ? `${j1.participant.sekolah} (${j1.score} Poin - ${j1.pct.toFixed(1)}%)` : 'Belum Ada',
+        'Juara 1 SLTP (Emas)': j1 ? `${j1.participant.sekolah} (${j1.score} Poin - ${j1.pct.toFixed(1)}%)` : 'Belum Ada',
         'Peleton Juara 1': j1?.participant.peleton || '-',
-        'Juara 2 (Perak)': j2 ? `${j2.participant.sekolah} (${j2.score} Poin - ${j2.pct.toFixed(1)}%)` : 'Belum Ada',
+        'Juara 2 SLTP (Perak)': j2 ? `${j2.participant.sekolah} (${j2.score} Poin - ${j2.pct.toFixed(1)}%)` : 'Belum Ada',
         'Peleton Juara 2': j2?.participant.peleton || '-',
-        'Juara 3 (Perunggu)': j3 ? `${j3.participant.sekolah} (${j3.score} Poin - ${j3.pct.toFixed(1)}%)` : 'Belum Ada',
+        'Juara 3 SLTP (Perunggu)': j3 ? `${j3.participant.sekolah} (${j3.score} Poin - ${j3.pct.toFixed(1)}%)` : 'Belum Ada',
         'Peleton Juara 3': j3?.participant.peleton || '-'
       };
     });
-    const wsRingkasan = XLSX.utils.json_to_sheet(rowsRingkasanJuara);
-    XLSX.utils.book_append_sheet(workbook, wsRingkasan, 'Ringkasan Juara Kategori');
+    const wsPodiumSltp = XLSX.utils.json_to_sheet(rowsPodiumSltp);
+    XLSX.utils.book_append_sheet(workbook, wsPodiumSltp, 'Podium Kategori SLTP');
 
-    // SHEET 3 S/D 13: MASING-MASING KATEGORI PERLOMBAAN DI SHEET TERPISAH
-    categories.forEach((cat, idx) => {
+    // 4. Sheet Podium Juara Kategori SLTA
+    const rowsPodiumSlta = categories.map((cat, idx) => {
       const catData = allCategoriesRankings[cat.key];
-      const sourceList = catData ? catData.leaderboard : [];
+      const j1 = catData?.topThreeSLTA.find(t => t.rank === 1);
+      const j2 = catData?.topThreeSLTA.find(t => t.rank === 2);
+      const j3 = catData?.topThreeSLTA.find(t => t.rank === 3);
 
-      const catRows = sourceList.map((item, pIdx) => {
-        const rowObj: Record<string, any> = {
-          'No': pIdx + 1,
-          'Peringkat Kategori': item.catRank ? `Juara ${item.catRank}` : 'Belum Lengkap',
-          'Peringkat Jenjang': item.jenjangCatRank ? `Juara ${item.jenjangCatRank} (${item.jenjang})` : '-',
-          'No. Peserta': item.nomor,
-          'Tingkat': item.jenjang || 'SLTP',
-          'Nama Sekolah': item.sekolah,
-          'Nama Peleton': item.peleton || '-',
-          'Hari / Tanggal': item.tanggal,
-          'Juri Penilai': item.juri
-        };
+      return {
+        'No': idx + 1,
+        'Tingkat': 'SLTA',
+        'Kategori Mata Lomba': cat.title,
+        'Nama Singkat': cat.shortTitle,
+        'Nilai Maksimal': `${cat.maxPoints} Poin`,
+        'Juara 1 SLTA (Emas)': j1 ? `${j1.participant.sekolah} (${j1.score} Poin - ${j1.pct.toFixed(1)}%)` : 'Belum Ada',
+        'Peleton Juara 1': j1?.participant.peleton || '-',
+        'Juara 2 SLTA (Perak)': j2 ? `${j2.participant.sekolah} (${j2.score} Poin - ${j2.pct.toFixed(1)}%)` : 'Belum Ada',
+        'Peleton Juara 2': j2?.participant.peleton || '-',
+        'Juara 3 SLTA (Perunggu)': j3 ? `${j3.participant.sekolah} (${j3.score} Poin - ${j3.pct.toFixed(1)}%)` : 'Belum Ada',
+        'Peleton Juara 3': j3?.participant.peleton || '-'
+      };
+    });
+    const wsPodiumSlta = XLSX.utils.json_to_sheet(rowsPodiumSlta);
+    XLSX.utils.book_append_sheet(workbook, wsPodiumSlta, 'Podium Kategori SLTA');
 
-        // Kolom nilai tiap butir kriteria penilaian
-        cat.criteria.forEach(crit => {
-          const val = item.catScores[crit.no];
-          rowObj[`K${crit.no}. ${crit.name} (Max ${crit.weights[4]})`] = val !== undefined && val !== null ? val : '-';
-        });
+    // 5. Masing-masing kategori di sheet terpisah untuk SLTP dan SLTA
+    categories.forEach(cat => {
+      const catData = allCategoriesRankings[cat.key];
+      if (catData) {
+        if (catData.leaderboardSLTP.length > 0) {
+          const wsCatSltp = XLSX.utils.json_to_sheet(buildKategoriExcelRows(catData.leaderboardSLTP, cat, 'SLTP'));
+          XLSX.utils.book_append_sheet(workbook, wsCatSltp, `${cat.shortTitle} SLTP`.slice(0, 30));
+        }
+        if (catData.leaderboardSLTA.length > 0) {
+          const wsCatSlta = XLSX.utils.json_to_sheet(buildKategoriExcelRows(catData.leaderboardSLTA, cat, 'SLTA'));
+          XLSX.utils.book_append_sheet(workbook, wsCatSlta, `${cat.shortTitle} SLTA`.slice(0, 30));
+        }
+      }
+    });
 
-        rowObj[`TOTAL NILAI ${cat.shortTitle.toUpperCase()} (Max ${cat.maxPoints})`] = item.catSummary.sum;
+    XLSX.writeFile(workbook, `Buku_Rekap_Lengkap_Lomba_PBB_PKS_SLTP_SLTA_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    showToast('Buku Rekap Master Lengkap (Multi-Sheet SLTP & SLTA Terpisah) berhasil diunduh.');
+  };
         rowObj['Pencapaian (%)'] = Number(item.catSummary.pct.toFixed(2));
         rowObj['Status Penilaian'] = item.catSummary.isComplete ? 'Selesai Dinilai' : 'Belum Lengkap';
 
@@ -3779,6 +3890,7 @@ export default function App() {
 
         {/* SIDEBAR NAVIGATION */}
         <aside
+          ref={sidebarNavRef}
           className={`no-print bg-slate-900 border-r border-slate-800 text-slate-200 transition-all duration-200 z-40 flex flex-col shrink-0 ${
             sidebarOpen
               ? 'fixed inset-y-0 left-0 w-72 sm:w-80 shadow-2xl flex h-full pt-0 z-50'
@@ -3806,6 +3918,7 @@ export default function App() {
               onClick={() => {
                 setCurrentTab('dashboard');
                 setSidebarOpen(false);
+                closeAllSidebarDropdowns();
               }}
               className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
                 currentTab === 'dashboard'
@@ -3824,7 +3937,7 @@ export default function App() {
             {/* ---------------------------------------------------- */}
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
-                onClick={() => setSidebarCatDropdownOpen(prev => !prev)}
+                onClick={() => toggleSidebarDropdown('cat')}
                 className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
               >
                 <div className="flex items-center gap-2 min-w-0">
@@ -3901,7 +4014,7 @@ export default function App() {
             {/* ---------------------------------------------------- */}
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
-                onClick={() => setSidebarPesertaDropdownOpen(prev => !prev)}
+                onClick={() => toggleSidebarDropdown('peserta')}
                 className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
               >
                 <div className="flex items-center gap-2 min-w-0">
@@ -3984,6 +4097,7 @@ export default function App() {
                             onClick={() => {
                               setActivePesertaId(p.id);
                               setSidebarOpen(false);
+                              closeAllSidebarDropdowns();
                             }}
                             className={`w-full text-left p-2 rounded-lg text-xs transition cursor-pointer flex items-center justify-between gap-2 border ${
                               isCurrentActive
@@ -4022,20 +4136,29 @@ export default function App() {
                   <div className="pt-2 border-t border-slate-800 space-y-1.5">
                     {!isUserRole && (
                       <button
-                        onClick={openNewPesertaModal}
+                        onClick={() => {
+                          openNewPesertaModal();
+                          closeAllSidebarDropdowns();
+                        }}
                         className="w-full bg-blue-600 hover:bg-blue-700 text-white py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
                       >
                         <UserPlus className="w-3.5 h-3.5" /> + Tambah Peserta Baru
                       </button>
                     )}
                     <button
-                      onClick={() => handleExportDaftarPesertaExcel('all')}
+                      onClick={() => {
+                        handleExportDaftarPesertaExcel('all');
+                        closeAllSidebarDropdowns();
+                      }}
                       className="w-full bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-700/60 text-emerald-200 py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5 text-emerald-400" /> Unduh Daftar Excel (.xlsx)
                     </button>
                     <button
-                      onClick={() => setModalDaftarPesertaOpen(true)}
+                      onClick={() => {
+                        setModalDaftarPesertaOpen(true);
+                        closeAllSidebarDropdowns();
+                      }}
                       className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 py-1.5 px-2.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
                       <Users className="w-3.5 h-3.5 text-blue-400" /> Kelola Tabel Peserta
@@ -4050,7 +4173,7 @@ export default function App() {
             {/* ---------------------------------------------------- */}
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
-                onClick={() => setSidebarRekapDropdownOpen(prev => !prev)}
+                onClick={() => toggleSidebarDropdown('rekap')}
                 className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
               >
                 <div className="flex items-center gap-2 min-w-0">
@@ -4092,6 +4215,7 @@ export default function App() {
                           setCurrentTab('rekap');
                           setRekapViewMode('umum');
                           setSidebarOpen(false);
+                          closeAllSidebarDropdowns();
                         }}
                         className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                           currentTab === 'rekap' && rekapViewMode === 'umum'
@@ -4108,6 +4232,7 @@ export default function App() {
                           setCurrentTab('rekap');
                           setRekapViewMode('kategori');
                           setSidebarOpen(false);
+                          closeAllSidebarDropdowns();
                         }}
                         className={`w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                           currentTab === 'rekap' && rekapViewMode === 'kategori'
@@ -4126,7 +4251,10 @@ export default function App() {
                           {categories.map(c => (
                             <button
                               key={c.key}
-                              onClick={() => setRekapSelectedCategoryKey(c.key)}
+                              onClick={() => {
+                                setRekapSelectedCategoryKey(c.key);
+                                closeAllSidebarDropdowns();
+                              }}
                               className={`w-full text-left px-2 py-1 rounded text-[11px] truncate transition cursor-pointer ${
                                 rekapSelectedCategoryKey === c.key
                                   ? 'bg-amber-500/25 text-amber-300 font-bold'
@@ -4144,6 +4272,7 @@ export default function App() {
                           setCurrentTab('rekap');
                           setRekapViewMode('ringkasan');
                           setSidebarOpen(false);
+                          closeAllSidebarDropdowns();
                         }}
                         className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                           currentTab === 'rekap' && rekapViewMode === 'ringkasan'
@@ -4156,7 +4285,10 @@ export default function App() {
                       </button>
 
                       <button
-                        onClick={handleExportExcelMasterWorkbook}
+                        onClick={() => {
+                          handleExportExcelMasterWorkbook();
+                          closeAllSidebarDropdowns();
+                        }}
                         className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-emerald-300 hover:bg-emerald-950/40 hover:text-emerald-200 border border-emerald-700/40 transition cursor-pointer font-bold mt-1"
                       >
                         <Layers className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
@@ -4173,7 +4305,7 @@ export default function App() {
             {/* ---------------------------------------------------- */}
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
-                onClick={() => setSidebarFormDropdownOpen(prev => !prev)}
+                onClick={() => toggleSidebarDropdown('form')}
                 className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
               >
                 <div className="flex items-center gap-2 min-w-0">
@@ -4207,6 +4339,7 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('form_polisi_pelajar');
                       setSidebarOpen(false);
+                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                       currentTab === 'form_polisi_pelajar'
@@ -4222,6 +4355,7 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('form_calon_pks');
                       setSidebarOpen(false);
+                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                       currentTab === 'form_calon_pks'
@@ -4237,6 +4371,7 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('form_perkemahan_balok1');
                       setSidebarOpen(false);
+                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                       currentTab === 'form_perkemahan_balok1'
@@ -4252,6 +4387,7 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('form_perkemahan_balok2');
                       setSidebarOpen(false);
+                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                       currentTab === 'form_perkemahan_balok2'
@@ -4272,6 +4408,7 @@ export default function App() {
                 onClick={() => {
                   setBlankSheetCatKey('pbb');
                   setModalBlankSheetOpen(true);
+                  closeAllSidebarDropdowns();
                 }}
                 className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
               >
@@ -4286,6 +4423,7 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('rekap_pendaftaran');
                       setSidebarOpen(false);
+                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer font-bold ${
                       currentTab === 'rekap_pendaftaran'
@@ -4305,7 +4443,10 @@ export default function App() {
                   </button>
 
                   <button
-                    onClick={() => setModalPaymentSettingsOpen(true)}
+                    onClick={() => {
+                      setModalPaymentSettingsOpen(true);
+                      closeAllSidebarDropdowns();
+                    }}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-amber-400 hover:text-amber-300 hover:bg-slate-800 transition cursor-pointer font-bold"
                   >
                     <CreditCard className="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -4313,7 +4454,21 @@ export default function App() {
                   </button>
 
                   <button
-                    onClick={() => setModalSchoolAccountsOpen(true)}
+                    onClick={() => {
+                      setModalBlankoEditorOpen(true);
+                      closeAllSidebarDropdowns();
+                    }}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-indigo-400 hover:text-indigo-300 hover:bg-slate-800 transition cursor-pointer font-bold"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Edit Format Blangko</span>}
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setModalSchoolAccountsOpen(true);
+                      closeAllSidebarDropdowns();
+                    }}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-emerald-400 hover:text-emerald-300 hover:bg-slate-800 transition cursor-pointer font-bold"
                   >
                     <Building2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
@@ -4324,6 +4479,7 @@ export default function App() {
                     onClick={() => {
                       setUserFormTab('list');
                       setModalUserOpen(true);
+                      closeAllSidebarDropdowns();
                     }}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
                   >
@@ -5352,7 +5508,59 @@ export default function App() {
         {/* TAB 3: REKAPITULASI (JUARA UMUM & PER KATEGORI LOMBA) */}
         {/* ==================================================== */}
         {currentTab === 'rekap' && (
-          <div className="space-y-4">
+          <div className="space-y-5">
+            {/* TINGKAT SELEKTOR (SLTP VS SLTA) - PERSISTENT TAB BAR */}
+            <div className="bg-slate-900 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-md no-print border border-slate-800">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-black uppercase text-amber-400 px-2 tracking-wider flex items-center gap-1.5">
+                  <Shield className="w-4 h-4 text-amber-400" /> Jenjang Penilaian:
+                </span>
+                <div className="flex items-center bg-slate-800 p-1 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setJenjangFilter('all')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      jenjangFilter === 'all'
+                        ? 'bg-blue-600 text-white shadow'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
+                    }`}
+                  >
+                    <span>Semua (SLTP & SLTA Terpisah)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setJenjangFilter('SLTP')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      jenjangFilter === 'SLTP'
+                        ? 'bg-blue-600 text-white shadow'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
+                    }`}
+                  >
+                    <Building2 className="w-3.5 h-3.5 text-blue-300" />
+                    <span>Tingkat SLTP (SMP/MTs)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setJenjangFilter('SLTA')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      jenjangFilter === 'SLTA'
+                        ? 'bg-indigo-600 text-white shadow'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
+                    }`}
+                  >
+                    <GraduationCap className="w-3.5 h-3.5 text-indigo-300" />
+                    <span>Tingkat SLTA (SMA/SMK/MA)</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="text-xs text-slate-300 px-2 font-medium">
+                {jenjangFilter === 'all' && 'Nilai rekapitulasi, podium juara 1-2-3, dan piala juara umum dipisahkan mandiri untuk SLTP dan SLTA.'}
+                {jenjangFilter === 'SLTP' && 'Fokus tampilan khusus jenjang SLTP (SMP / MTs). Nilai SLTA disaring.'}
+                {jenjangFilter === 'SLTA' && 'Fokus tampilan khusus jenjang SLTA (SMA / SMK / MA). Nilai SLTP disaring.'}
+              </div>
+            </div>
+
             {/* View Mode Switcher (Juara Umum vs Per Kategori vs Ringkasan Pemenang) */}
             <div className="bg-white p-3 rounded-2xl shadow-sm border border-slate-200 flex flex-wrap items-center justify-between gap-3 no-print">
               <div className="flex flex-wrap items-center gap-2">
@@ -5365,7 +5573,7 @@ export default function App() {
                   }`}
                 >
                   <Trophy className="w-4 h-4 text-amber-300" />
-                  <span>Klasemen Juara Umum</span>
+                  <span>Dual Juara Umum (SLTP & SLTA)</span>
                 </button>
 
                 <button
@@ -5401,7 +5609,7 @@ export default function App() {
                   className="bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow transition cursor-pointer"
                 >
                   <Layers className="w-4 h-4 text-amber-300" />
-                  <span>Ekspor Buku Rekap (Multi-Sheet: Tiap Kategori Terpisah)</span>
+                  <span>Ekspor Buku Rekap (Sheet SLTP & SLTA Terpisah)</span>
                 </button>
 
                 {rekapViewMode === 'kategori' && (
@@ -5418,7 +5626,7 @@ export default function App() {
                     onClick={handleExportExcelJuaraUmum}
                     className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow transition cursor-pointer"
                   >
-                    <FileSpreadsheet className="w-4 h-4" /> Ekspor Juara Umum (.xlsx)
+                    <FileSpreadsheet className="w-4 h-4" /> Ekspor Juara Umum SLTP & SLTA (.xlsx)
                   </button>
                 )}
 
@@ -5476,12 +5684,11 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Quick Category Pills Bar (1-Click Switch antar Kategori) */}
+                {/* Quick Category Pills Bar */}
                 <div className="bg-white p-2.5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-1.5 overflow-x-auto">
                   <span className="text-xs font-bold text-slate-500 uppercase px-2 shrink-0">Pilih Kategori:</span>
                   {categories.map((cat, idx) => {
                     const isSelected = cat.key === rekapSelectedCategoryKey;
-                    const catTop = allCategoriesRankings[cat.key]?.topThree[0];
                     return (
                       <button
                         key={cat.key}
@@ -5502,102 +5709,10 @@ export default function App() {
                     );
                   })}
                 </div>
-
-                {/* Podium Juara 1, 2, 3 untuk Kategori yang Dipilih */}
-                {allCategoriesRankings[rekapSelectedCategoryKey]?.topThree.length > 0 && (
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {/* Juara 2 (Perak) */}
-                    {(() => {
-                      const j2 = allCategoriesRankings[rekapSelectedCategoryKey]?.topThree.find(t => t.rank === 2);
-                      return (
-                        <div className={`p-4 rounded-2xl border transition order-2 md:order-1 ${
-                          j2 ? 'bg-gradient-to-b from-slate-50 to-white border-slate-300 shadow-sm' : 'bg-slate-50/50 border-dashed border-slate-200 opacity-60'
-                        }`}>
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-200 text-slate-800">
-                              <Medal className="w-3.5 h-3.5 text-slate-600" /> Juara 2 ({rekapActiveCategoryObj.shortTitle})
-                            </span>
-                            <span className="text-xs font-bold text-slate-500">Perak</span>
-                          </div>
-                          {j2 ? (
-                            <div>
-                              <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j2.participant.sekolah}</h4>
-                              <p className="text-xs text-blue-600 font-semibold">{j2.participant.peleton || `No. ${j2.participant.nomor}`}</p>
-                              <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
-                                <span className="text-xs text-slate-500">Nilai Perolehan:</span>
-                                <span className="text-lg font-black text-slate-800">{j2.score} <span className="text-xs font-normal text-slate-500">/ {rekapActiveCategoryObj.maxPoints} ({j2.pct.toFixed(1)}%)</span></span>
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
-                          )}
-                        </div>
-                      );
-                    })()}
-
-                    {/* Juara 1 (Emas - Podium Utama) */}
-                    {(() => {
-                      const j1 = allCategoriesRankings[rekapSelectedCategoryKey]?.topThree.find(t => t.rank === 1);
-                      return (
-                        <div className={`p-4 rounded-2xl border transition order-1 md:order-2 ${
-                          j1 ? 'bg-gradient-to-b from-amber-50/80 via-amber-50/30 to-white border-amber-300 shadow-md ring-2 ring-amber-400/30' : 'bg-slate-50/50 border-dashed border-slate-200 opacity-60'
-                        }`}>
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-sm">
-                              <Crown className="w-4 h-4 text-amber-900" /> Juara 1 ({rekapActiveCategoryObj.shortTitle})
-                            </span>
-                            <span className="text-xs font-black text-amber-600 uppercase tracking-wider">Terbaik 🥇</span>
-                          </div>
-                          {j1 ? (
-                            <div>
-                              <h4 className="font-black text-slate-900 text-lg leading-tight truncate">{j1.participant.sekolah}</h4>
-                              <p className="text-xs text-blue-600 font-bold">{j1.participant.peleton || `No. ${j1.participant.nomor}`}</p>
-                              <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-amber-100">
-                                <span className="text-xs text-amber-800 font-bold">Skor Tertinggi:</span>
-                                <span className="text-xl font-black text-amber-950">{j1.score} <span className="text-xs font-normal text-slate-600">/ {rekapActiveCategoryObj.maxPoints} ({j1.pct.toFixed(1)}%)</span></span>
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
-                          )}
-                        </div>
-                      );
-                    })()}
-
-                    {/* Juara 3 (Perunggu) */}
-                    {(() => {
-                      const j3 = allCategoriesRankings[rekapSelectedCategoryKey]?.topThree.find(t => t.rank === 3);
-                      return (
-                        <div className={`p-4 rounded-2xl border transition order-3 ${
-                          j3 ? 'bg-gradient-to-b from-amber-50/40 to-white border-amber-200 shadow-sm' : 'bg-slate-50/50 border-dashed border-slate-200 opacity-60'
-                        }`}>
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white">
-                              <Award className="w-3.5 h-3.5" /> Juara 3 ({rekapActiveCategoryObj.shortTitle})
-                            </span>
-                            <span className="text-xs font-bold text-amber-700">Perunggu</span>
-                          </div>
-                          {j3 ? (
-                            <div>
-                              <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j3.participant.sekolah}</h4>
-                              <p className="text-xs text-blue-600 font-semibold">{j3.participant.peleton || `No. ${j3.participant.nomor}`}</p>
-                              <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
-                                <span className="text-xs text-slate-500">Nilai Perolehan:</span>
-                                <span className="text-lg font-black text-slate-800">{j3.score} <span className="text-xs font-normal text-slate-500">/ {rekapActiveCategoryObj.maxPoints} ({j3.pct.toFixed(1)}%)</span></span>
-                              </div>
-                            </div>
-                          ) : (
-                            <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
               </div>
             )}
 
-            {/* Filter Bar (Search, Jenjang, Status) - Tampil di Semua Mode Rekap */}
+            {/* Filter Bar: Pencarian & Status */}
             <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-wrap justify-between items-center gap-3 no-print">
               <div className="flex-1 min-w-[240px]">
                 <div className="relative">
@@ -5612,444 +5727,1213 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  value={jenjangFilter}
-                  onChange={e => setJenjangFilter(e.target.value as any)}
-                  className="border border-slate-300 rounded-xl text-sm px-3 py-2 bg-white font-bold text-slate-800 outline-none"
-                >
-                  <option value="all">Semua Tingkat (SLTP & SLTA)</option>
-                  <option value="SLTP">Hanya Tingkat SLTP (SMP/MTs)</option>
-                  <option value="SLTA">Hanya Tingkat SLTA (SMA/SMK/MA)</option>
-                </select>
-
+              <div className="flex items-center gap-2">
                 <select
                   value={statusFilter}
                   onChange={e => setStatusFilter(e.target.value as any)}
                   className="border border-slate-300 rounded-xl text-sm px-3 py-2 bg-white font-medium outline-none"
                 >
-                  <option value="all">Semua Status</option>
+                  <option value="all">Semua Status Penilaian</option>
                   <option value="completed">Hanya yang Lengkap</option>
                   <option value="pending">Hanya yang Belum Selesai</option>
                 </select>
               </div>
             </div>
 
-            {/* ============================================== */}
-            {/* VIEW 1: KLASEMEN JUARA UMUM DENGAN RANK PER KATEGORI */}
-            {/* ============================================== */}
+            {/* ==================================================== */}
+            {/* VIEW 1: DUAL JUARA UMUM (SLTP & SLTA TERPISAH MANDIRI) */}
+            {/* ==================================================== */}
             {rekapViewMode === 'umum' && (
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
-                  <div>
-                    <h2 className="text-base sm:text-lg font-black uppercase tracking-wide flex items-center gap-2">
-                      <Trophy className="w-5 h-5 text-amber-400" /> KLASEMEN AKHIR JUARA UMUM (TOTAL {activeCalc?.maxGrandTotal || 1200} POIN)
-                    </h2>
-                    <p className="text-xs text-blue-300 mt-0.5">
-                      {jenjangFilter === 'all'
-                        ? 'Menampilkan seluruh peserta SLTP & SLTA'
-                        : `Klasemen Khusus Jenjang ${jenjangFilter}`}. Setiap kolom mata lomba menampilkan perolehan nilai dan peringkat mandiri peserta di kategori tersebut.
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold bg-slate-800 px-3 py-1 rounded-full border border-blue-400/30">
-                      {overallStandingsData.length} Peserta
-                    </span>
-                  </div>
-                </div>
+              <div className="space-y-8">
+                {/* 1. SEKSI JUARA UMUM TINGKAT SLTP */}
+                {(jenjangFilter === 'all' || jenjangFilter === 'SLTP') && (() => {
+                  const sltpItems = overallStandingsData
+                    .filter(item => (item.jenjang || 'SLTP') === 'SLTP')
+                    .sort((a, b) => {
+                      if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+                        return (a.jenjangRank || 999) - (b.jenjangRank || 999);
+                      }
+                      if (a.calc.mandatoryCompleted) return -1;
+                      if (b.calc.mandatoryCompleted) return 1;
+                      return (a.nomor || '').localeCompare(b.nomor || '');
+                    });
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm border-collapse">
-                    <thead className="bg-slate-100 text-slate-700 text-xs uppercase font-bold tracking-wider border-b border-slate-200">
-                      <tr>
-                        <th className="py-3 px-3 text-center w-12">No</th>
-                        <th className="py-3 px-3 text-center w-28">Peringkat</th>
-                        <th className="py-3 px-3 text-center w-16">No</th>
-                        <th className="py-3 px-3 text-center w-20">Tingkat</th>
-                        <th className="py-3 px-4 min-w-[200px]">Nama Sekolah & Regu</th>
-                        {categories.map(cat => (
-                          <th
-                            key={cat.key}
-                            onClick={() => {
-                              setRekapSelectedCategoryKey(cat.key);
-                              setRekapViewMode('kategori');
-                            }}
-                            title={`Klik untuk melihat peringkat dan rincian khusus ${cat.title}`}
-                            className="py-3 px-2 text-center text-[11px] whitespace-nowrap cursor-pointer hover:bg-blue-100 transition"
-                          >
-                            <span className="underline decoration-dotted decoration-blue-500 font-black">{cat.shortTitle}</span><br />
-                            <span className="text-[10px] text-slate-500 font-normal">Max {cat.maxPoints}</span>
-                          </th>
-                        ))}
-                        <th className="py-3 px-3 text-center w-28 bg-amber-50 text-amber-950 font-black">
-                          Total Nilai<br />
-                          <span className="text-[10px] text-amber-600 font-normal">Max {activeCalc?.maxGrandTotal}</span>
-                        </th>
-                        <th className="py-3 px-3 text-center w-20">Persen</th>
-                        <th className="py-3 px-3 text-center w-28">Status</th>
-                        <th className="py-3 px-3 text-center w-28 no-print">Aksi</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200 font-medium">
-                      {overallStandingsData.length === 0 ? (
-                        <tr>
-                          <td colSpan={9 + categories.length} className="py-8 text-center text-slate-400">
-                            Tidak ada data peserta ditemukan pada filter ini.
-                          </td>
-                        </tr>
-                      ) : (
-                        overallStandingsData.map((item, index) => {
-                          const displayRank = jenjangFilter !== 'all' ? item.jenjangRank : item.rank;
-                          let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
-                          let rowHighlight = '';
+                  const j1 = sltpItems.find(t => t.jenjangRank === 1 && t.calc.mandatoryCompleted);
+                  const j2 = sltpItems.find(t => t.jenjangRank === 2 && t.calc.mandatoryCompleted);
+                  const j3 = sltpItems.find(t => t.jenjangRank === 3 && t.calc.mandatoryCompleted);
 
-                          if (item.calc.mandatoryCompleted && displayRank !== null) {
-                            if (displayRank === 1) {
-                              rankBadge = (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-sm">
-                                  <Crown className="w-3.5 h-3.5" /> Juara Umum 1
-                                </span>
-                              );
-                              rowHighlight = 'bg-amber-50/60';
-                            } else if (displayRank === 2) {
-                              rankBadge = (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-300 text-slate-900 shadow-sm">
-                                  <Medal className="w-3.5 h-3.5" /> Juara Umum 2
-                                </span>
-                              );
-                              rowHighlight = 'bg-slate-50';
-                            } else if (displayRank === 3) {
-                              rankBadge = (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white shadow-sm">
-                                  <Award className="w-3.5 h-3.5" /> Juara Umum 3
-                                </span>
-                              );
-                            } else {
-                              rankBadge = (
-                                <span className="font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
-                                  Peringkat {displayRank}
-                                </span>
-                              );
-                            }
-                          }
+                  return (
+                    <div className="bg-white rounded-2xl shadow-md border-2 border-blue-200 overflow-hidden">
+                      {/* Banner Header Juara Umum SLTP */}
+                      <div className="p-4 sm:p-5 bg-gradient-to-r from-blue-950 via-blue-900 to-indigo-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="p-3 bg-amber-400 text-amber-950 rounded-2xl shadow-md">
+                            <Trophy className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-blue-500/30 text-blue-200 border border-blue-400/30">
+                                Klasemen Mandiri
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-400 text-amber-950">
+                                Tingkat SLTP (SMP / MTs)
+                              </span>
+                            </div>
+                            <h2 className="text-lg sm:text-xl font-black uppercase tracking-tight text-white mt-1">
+                              PIALA BERGILIR JUARA UMUM TINGKAT SLTP
+                            </h2>
+                            <p className="text-xs text-blue-200">
+                              Akumulasi nilai seluruh mata lomba khusus jenjang SMP / MTs (Maks. {activeCalc?.maxGrandTotal || 1200} Poin).
+                            </p>
+                          </div>
+                        </div>
 
-                          const statusBadge = item.calc.mandatoryCompleted ? (
-                            <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
-                              Lengkap
-                            </span>
-                          ) : (
-                            <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
-                              Proses ({item.calc.completedCategoriesCount}/{item.calc.totalCategoriesCount})
-                            </span>
-                          );
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold bg-blue-800/80 px-3 py-1 rounded-full border border-blue-300/30">
+                            {sltpItems.length} Kontingen SLTP
+                          </span>
+                        </div>
+                      </div>
 
-                          return (
-                            <tr key={item.id} className={`hover:bg-blue-50/40 transition ${rowHighlight}`}>
-                              <td className="py-3 px-3 text-center text-slate-400">{index + 1}</td>
-                              <td className="py-3 px-3 text-center">{rankBadge}</td>
-                              <td className="py-3 px-3 text-center font-bold text-slate-700">{item.nomor}</td>
-                              <td className="py-3 px-3 text-center">
-                                <span className={`px-2 py-0.5 rounded text-[11px] font-black ${
-                                  item.jenjang === 'SLTA'
-                                    ? 'bg-indigo-100 text-indigo-800'
-                                    : 'bg-blue-100 text-blue-800'
-                                }`}>
-                                  {item.jenjang || 'SLTP'}
-                                </span>
-                              </td>
-                              <td className="py-3 px-4">
-                                <strong className="text-slate-900 block leading-tight">{item.sekolah}</strong>
-                                {item.peleton ? (
-                                  <span className="text-xs text-blue-600 font-semibold">{item.peleton}</span>
-                                ) : (
-                                  <span className="text-xs text-slate-400 italic">Tanpa Nama Regu</span>
-                                )}
-                              </td>
+                      {/* Podium Juara Umum SLTP (Emas, Perak, Perunggu) */}
+                      <div className="p-4 sm:p-5 bg-slate-50 border-b border-slate-200">
+                        <div className="text-xs font-black uppercase tracking-wider text-blue-900 mb-3 flex items-center gap-1.5">
+                          <Crown className="w-4 h-4 text-amber-500" />
+                          <span>Podium Juara Umum Tingkat SLTP</span>
+                        </div>
 
-                              {/* Nilai dan Peringkat Kategori Mandiri */}
-                              {categories.map(cat => {
-                                const s = item.calc.categorySummaries[cat.key]?.sum || 0;
-                                const isDone = item.calc.categorySummaries[cat.key]?.isComplete;
-                                const cRank = jenjangFilter !== 'all'
-                                  ? item.catRanks[cat.key]?.jenjangRank
-                                  : item.catRanks[cat.key]?.rank;
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          {/* Juara Umum 2 SLTP (Perak) */}
+                          <div className={`p-4 rounded-2xl border transition order-2 md:order-1 ${
+                            j2 ? 'bg-white border-slate-300 shadow-sm' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-300 text-slate-900 shadow-xs">
+                                <Medal className="w-3.5 h-3.5" /> Juara Umum 2 SLTP
+                              </span>
+                              <span className="text-xs font-bold text-slate-500">Perak</span>
+                            </div>
+                            {j2 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j2.sekolah}</h4>
+                                <p className="text-xs text-blue-600 font-semibold">{j2.peleton || `No. ${j2.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
+                                  <span className="text-xs text-slate-500">Total Nilai:</span>
+                                  <span className="text-lg font-black text-slate-800">{j2.calc.grandTotal} <span className="text-xs font-normal text-slate-500">/ {j2.calc.maxGrandTotal} ({j2.calc.grandPct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
 
-                                let rankPill = null;
-                                if (isDone && cRank !== null && cRank !== undefined) {
-                                  if (cRank === 1) {
-                                    rankPill = (
-                                      <span className="block text-[9px] font-black text-amber-900 bg-amber-200/90 rounded px-1 py-0.2 mt-0.5">
-                                        🥇 #1
+                          {/* Juara Umum 1 SLTP (Emas - Podium Utama) */}
+                          <div className={`p-4 sm:p-5 rounded-2xl border-2 transition order-1 md:order-2 ${
+                            j1 ? 'bg-gradient-to-b from-amber-50/90 via-amber-50/40 to-white border-amber-400 shadow-md ring-2 ring-amber-400/30' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-sm">
+                                <Crown className="w-4 h-4 text-amber-900" /> Juara Umum 1 SLTP
+                              </span>
+                              <span className="text-xs font-black text-amber-700 uppercase tracking-wider">Piala Bergilir 🏆</span>
+                            </div>
+                            {j1 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-lg leading-tight truncate">{j1.sekolah}</h4>
+                                <p className="text-xs text-blue-600 font-bold">{j1.peleton || `No. ${j1.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-amber-200">
+                                  <span className="text-xs text-amber-900 font-bold">Skor Tertinggi:</span>
+                                  <span className="text-2xl font-black text-amber-950">{j1.calc.grandTotal} <span className="text-xs font-normal text-slate-600">/ {j1.calc.maxGrandTotal} ({j1.calc.grandPct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+
+                          {/* Juara Umum 3 SLTP (Perunggu) */}
+                          <div className={`p-4 rounded-2xl border transition order-3 ${
+                            j3 ? 'bg-white border-amber-200 shadow-sm' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white shadow-xs">
+                                <Award className="w-3.5 h-3.5" /> Juara Umum 3 SLTP
+                              </span>
+                              <span className="text-xs font-bold text-amber-700">Perunggu</span>
+                            </div>
+                            {j3 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j3.sekolah}</h4>
+                                <p className="text-xs text-blue-600 font-semibold">{j3.peleton || `No. ${j3.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
+                                  <span className="text-xs text-slate-500">Total Nilai:</span>
+                                  <span className="text-lg font-black text-slate-800">{j3.calc.grandTotal} <span className="text-xs font-normal text-slate-500">/ {j3.calc.maxGrandTotal} ({j3.calc.grandPct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Tabel Klasemen SLTP */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm border-collapse">
+                          <thead className="bg-blue-50/70 text-slate-700 text-xs uppercase font-bold tracking-wider border-b border-blue-200">
+                            <tr>
+                              <th className="py-3 px-3 text-center w-12">No</th>
+                              <th className="py-3 px-3 text-center w-36">Peringkat SLTP</th>
+                              <th className="py-3 px-3 text-center w-16">No</th>
+                              <th className="py-3 px-4 min-w-[200px]">Nama Sekolah & Regu (SLTP)</th>
+                              {categories.map(cat => (
+                                <th
+                                  key={cat.key}
+                                  onClick={() => {
+                                    setRekapSelectedCategoryKey(cat.key);
+                                    setRekapViewMode('kategori');
+                                  }}
+                                  title={`Klik untuk melihat rincian ${cat.title}`}
+                                  className="py-3 px-2 text-center text-[11px] whitespace-nowrap cursor-pointer hover:bg-blue-100 transition"
+                                >
+                                  <span className="underline decoration-dotted decoration-blue-500 font-black">{cat.shortTitle}</span><br />
+                                  <span className="text-[10px] text-slate-500 font-normal">Max {cat.maxPoints}</span>
+                                </th>
+                              ))}
+                              <th className="py-3 px-3 text-center w-28 bg-amber-50 text-amber-950 font-black">
+                                Total Nilai<br />
+                                <span className="text-[10px] text-amber-600 font-normal">Max {activeCalc?.maxGrandTotal}</span>
+                              </th>
+                              <th className="py-3 px-3 text-center w-20">Persen</th>
+                              <th className="py-3 px-3 text-center w-28">Status</th>
+                              <th className="py-3 px-3 text-center w-28 no-print">Aksi</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200 font-medium">
+                            {sltpItems.length === 0 ? (
+                              <tr>
+                                <td colSpan={8 + categories.length} className="py-8 text-center text-slate-400">
+                                  Tidak ada peserta tingkat SLTP ditemukan.
+                                </td>
+                              </tr>
+                            ) : (
+                              sltpItems.map((item, index) => {
+                                const displayRank = item.jenjangRank;
+                                let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
+                                let rowHighlight = '';
+
+                                if (item.calc.mandatoryCompleted && displayRank !== null) {
+                                  if (displayRank === 1) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-xs">
+                                        <Crown className="w-3.5 h-3.5" /> Juara Umum 1
                                       </span>
                                     );
-                                  } else if (cRank === 2) {
-                                    rankPill = (
-                                      <span className="block text-[9px] font-black text-slate-800 bg-slate-200 rounded px-1 py-0.2 mt-0.5">
-                                        🥈 #2
+                                    rowHighlight = 'bg-amber-50/50';
+                                  } else if (displayRank === 2) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-300 text-slate-900 shadow-xs">
+                                        <Medal className="w-3.5 h-3.5" /> Juara Umum 2
                                       </span>
                                     );
-                                  } else if (cRank === 3) {
-                                    rankPill = (
-                                      <span className="block text-[9px] font-black text-amber-900 bg-amber-100 rounded px-1 py-0.2 mt-0.5">
-                                        🥉 #3
+                                    rowHighlight = 'bg-slate-50';
+                                  } else if (displayRank === 3) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white shadow-xs">
+                                        <Award className="w-3.5 h-3.5" /> Juara Umum 3
                                       </span>
                                     );
                                   } else {
-                                    rankPill = (
-                                      <span className="block text-[9px] font-bold text-slate-500 bg-slate-100 rounded px-1 py-0.2 mt-0.5">
-                                        #{cRank}
+                                    rankBadge = (
+                                      <span className="font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
+                                        Peringkat {displayRank} SLTP
                                       </span>
                                     );
                                   }
                                 }
 
-                                return (
-                                  <td
-                                    key={cat.key}
-                                    onClick={() => {
-                                      setRekapSelectedCategoryKey(cat.key);
-                                      setRekapViewMode('kategori');
-                                    }}
-                                    title={`Klik untuk melihat rincian kriteria & peringkat ${cat.title}`}
-                                    className="py-2.5 px-2 text-center tabular-nums cursor-pointer hover:bg-blue-100/60 transition"
-                                  >
-                                    <span className="font-extrabold text-slate-800 text-xs block">{s}</span>
-                                    {rankPill}
-                                  </td>
-                                );
-                              })}
-
-                              <td className="py-3 px-3 text-center font-black text-amber-950 bg-amber-50 text-base tabular-nums">
-                                {item.calc.grandTotal}
-                              </td>
-                              <td className="py-3 px-3 text-center font-semibold text-slate-700 tabular-nums">
-                                {item.calc.grandPct.toFixed(1)}%
-                              </td>
-                              <td className="py-3 px-3 text-center">{statusBadge}</td>
-                              <td className="py-3 px-3 text-center no-print">
-                                <div className="flex items-center justify-center gap-1">
-                                  <button
-                                    onClick={() => {
-                                      setPrintPesertaId(item.id);
-                                      setModalPrintOpen(true);
-                                    }}
-                                    title="Cetak Lembar Nilai"
-                                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg cursor-pointer"
-                                  >
-                                    <Printer className="w-4 h-4" />
-                                  </button>
-                                  {!isUserRole && (
-                                    <button
-                                      onClick={() => {
-                                        setActivePesertaId(item.id);
-                                        setCurrentTab(categories[0].key);
-                                      }}
-                                      title="Input / Edit Nilai"
-                                      className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg cursor-pointer"
-                                    >
-                                      <Edit className="w-4 h-4" />
-                                    </button>
-                                  )}
-                                  {isAdminRole && (
-                                    <button
-                                      onClick={() => handleDeletePeserta(item.id)}
-                                      title="Hapus Peserta"
-                                      className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {/* ============================================== */}
-            {/* VIEW 2: PERINGKAT PER KATEGORI PERLOMBAAN */}
-            {/* ============================================== */}
-            {rekapViewMode === 'kategori' && (
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
-                  <div>
-                    <h2 className="text-base sm:text-lg font-black uppercase tracking-wide flex items-center gap-2">
-                      <Medal className="w-5 h-5 text-amber-400" /> PERINGKAT JUARA KATEGORI: {rekapActiveCategoryObj.title.toUpperCase()} (MAX {rekapActiveCategoryObj.maxPoints} POIN)
-                    </h2>
-                    <p className="text-xs text-blue-300 mt-0.5">
-                      {jenjangFilter === 'all'
-                        ? 'Peringkat umum gabungan seluruh tingkat'
-                        : `Peringkat khusus tingkat ${jenjangFilter}`}. Menampilkan rincian skor per butir kriteria penilaian.
-                    </p>
-                  </div>
-                  <span className="text-xs font-bold bg-slate-800 px-3 py-1 rounded-full border border-blue-400/30">
-                    {categorySpecificStandingsData.length} Peserta
-                  </span>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm border-collapse">
-                    <thead className="bg-slate-100 text-slate-700 text-xs uppercase font-bold tracking-wider border-b border-slate-200">
-                      <tr>
-                        <th className="py-3 px-3 text-center w-12">No</th>
-                        <th className="py-3 px-3 text-center w-28">Peringkat</th>
-                        <th className="py-3 px-3 text-center w-16">No</th>
-                        <th className="py-3 px-3 text-center w-20">Tingkat</th>
-                        <th className="py-3 px-4 min-w-[200px]">Nama Sekolah & Regu</th>
-                        {/* Rincian Tiap Butir Kriteria Penilaian */}
-                        {rekapActiveCategoryObj.criteria.map(crit => (
-                          <th
-                            key={crit.no}
-                            title={`Kriteria ${crit.no}: ${crit.name}`}
-                            className="py-3 px-2 text-center text-[11px] whitespace-nowrap cursor-help bg-slate-50"
-                          >
-                            K{crit.no}<br />
-                            <span className="text-[10px] text-slate-400 font-normal">Max {crit.weights[4]}</span>
-                          </th>
-                        ))}
-                        <th className="py-3 px-3 text-center w-28 bg-amber-50 text-amber-950 font-black">
-                          Subtotal<br />
-                          <span className="text-[10px] text-amber-600 font-normal">Max {rekapActiveCategoryObj.maxPoints}</span>
-                        </th>
-                        <th className="py-3 px-3 text-center w-20">Persen</th>
-                        <th className="py-3 px-3 text-center w-28">Status</th>
-                        <th className="py-3 px-3 text-center w-24 no-print">Aksi</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200 font-medium">
-                      {categorySpecificStandingsData.length === 0 ? (
-                        <tr>
-                          <td colSpan={8 + rekapActiveCategoryObj.criteria.length} className="py-8 text-center text-slate-400">
-                            Tidak ada data peserta ditemukan pada filter ini.
-                          </td>
-                        </tr>
-                      ) : (
-                        categorySpecificStandingsData.map((item, index) => {
-                          const activeRank = jenjangFilter !== 'all' ? item.jenjangCatRank : item.catRank;
-                          let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
-                          let rowHighlight = '';
-
-                          if (item.catSummary.isComplete && activeRank !== null) {
-                            if (activeRank === 1) {
-                              rankBadge = (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-sm">
-                                  <Crown className="w-3.5 h-3.5" /> Juara 1
-                                </span>
-                              );
-                              rowHighlight = 'bg-amber-50/60';
-                            } else if (activeRank === 2) {
-                              rankBadge = (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-300 text-slate-900 shadow-sm">
-                                  <Medal className="w-3.5 h-3.5" /> Juara 2
-                                </span>
-                              );
-                              rowHighlight = 'bg-slate-50';
-                            } else if (activeRank === 3) {
-                              rankBadge = (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white shadow-sm">
-                                  <Award className="w-3.5 h-3.5" /> Juara 3
-                                </span>
-                              );
-                            } else {
-                              rankBadge = (
-                                <span className="font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
-                                  Peringkat {activeRank}
-                                </span>
-                              );
-                            }
-                          }
-
-                          const statusBadge = item.catSummary.isComplete ? (
-                            <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
-                              Lengkap ({item.catSummary.totalCriteria}/{item.catSummary.totalCriteria})
-                            </span>
-                          ) : (
-                            <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
-                              Proses ({item.catSummary.count}/{item.catSummary.totalCriteria})
-                            </span>
-                          );
-
-                          return (
-                            <tr key={item.id} className={`hover:bg-blue-50/40 transition ${rowHighlight}`}>
-                              <td className="py-3 px-3 text-center text-slate-400">{index + 1}</td>
-                              <td className="py-3 px-3 text-center">{rankBadge}</td>
-                              <td className="py-3 px-3 text-center font-bold text-slate-700">{item.nomor}</td>
-                              <td className="py-3 px-3 text-center">
-                                <span className={`px-2 py-0.5 rounded text-[11px] font-black ${
-                                  item.jenjang === 'SLTA'
-                                    ? 'bg-indigo-100 text-indigo-800'
-                                    : 'bg-blue-100 text-blue-800'
-                                }`}>
-                                  {item.jenjang || 'SLTP'}
-                                </span>
-                              </td>
-                              <td className="py-3 px-4">
-                                <strong className="text-slate-900 block leading-tight">{item.sekolah}</strong>
-                                {item.peleton ? (
-                                  <span className="text-xs text-blue-600 font-semibold">{item.peleton}</span>
+                                const statusBadge = item.calc.mandatoryCompleted ? (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
+                                    Lengkap
+                                  </span>
                                 ) : (
-                                  <span className="text-xs text-slate-400 italic">Tanpa Nama Regu</span>
-                                )}
-                              </td>
-
-                              {/* Nilai Tiap Butir Kriteria */}
-                              {rekapActiveCategoryObj.criteria.map(crit => {
-                                const val = item.catScores[crit.no];
-                                return (
-                                  <td key={crit.no} className="py-3 px-2 text-center font-semibold text-slate-700 tabular-nums">
-                                    {val !== undefined && val !== null ? val : '-'}
-                                  </td>
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
+                                    Proses ({item.calc.completedCategoriesCount}/{item.calc.totalCategoriesCount})
+                                  </span>
                                 );
-                              })}
 
-                              <td className="py-3 px-3 text-center font-black text-amber-950 bg-amber-50 text-base tabular-nums">
-                                {item.catSummary.sum}
-                              </td>
-                              <td className="py-3 px-3 text-center font-semibold text-slate-700 tabular-nums">
-                                {item.catSummary.pct.toFixed(1)}%
-                              </td>
-                              <td className="py-3 px-3 text-center">{statusBadge}</td>
-                              <td className="py-3 px-3 text-center no-print">
-                                {!isUserRole && (
-                                  <button
-                                    onClick={() => {
-                                      setActivePesertaId(item.id);
-                                      setCurrentTab(rekapActiveCategoryObj.key);
-                                    }}
-                                    title="Input / Edit Nilai Kategori Ini"
-                                    className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg cursor-pointer"
-                                  >
-                                    <Edit className="w-4 h-4" />
-                                  </button>
-                                )}
-                              </td>
+                                return (
+                                  <tr key={item.id} className={`hover:bg-blue-50/40 transition ${rowHighlight}`}>
+                                    <td className="py-3 px-3 text-center text-slate-400">{index + 1}</td>
+                                    <td className="py-3 px-3 text-center">{rankBadge}</td>
+                                    <td className="py-3 px-3 text-center font-bold text-slate-700">{item.nomor}</td>
+                                    <td className="py-3 px-4">
+                                      <strong className="text-slate-900 block leading-tight">{item.sekolah}</strong>
+                                      {item.peleton ? (
+                                        <span className="text-xs text-blue-600 font-semibold">{item.peleton}</span>
+                                      ) : (
+                                        <span className="text-xs text-slate-400 italic">Tanpa Nama Regu</span>
+                                      )}
+                                    </td>
+
+                                    {/* Kolom Tiap Mata Lomba (Peringkat SLTP Mandiri) */}
+                                    {categories.map(cat => {
+                                      const s = item.calc.categorySummaries[cat.key]?.sum || 0;
+                                      const isDone = item.calc.categorySummaries[cat.key]?.isComplete;
+                                      const cRank = item.catRanks[cat.key]?.jenjangRank;
+
+                                      let rankPill = null;
+                                      if (isDone && cRank !== null && cRank !== undefined) {
+                                        if (cRank === 1) {
+                                          rankPill = (
+                                            <span className="block text-[9px] font-black text-amber-900 bg-amber-200/90 rounded px-1 py-0.2 mt-0.5">
+                                              🥇 #1
+                                            </span>
+                                          );
+                                        } else if (cRank === 2) {
+                                          rankPill = (
+                                            <span className="block text-[9px] font-black text-slate-800 bg-slate-200 rounded px-1 py-0.2 mt-0.5">
+                                              🥈 #2
+                                            </span>
+                                          );
+                                        } else if (cRank === 3) {
+                                          rankPill = (
+                                            <span className="block text-[9px] font-black text-amber-900 bg-amber-100 rounded px-1 py-0.2 mt-0.5">
+                                              🥉 #3
+                                            </span>
+                                          );
+                                        } else {
+                                          rankPill = (
+                                            <span className="block text-[9px] font-bold text-slate-500 bg-slate-100 rounded px-1 py-0.2 mt-0.5">
+                                              #{cRank}
+                                            </span>
+                                          );
+                                        }
+                                      }
+
+                                      return (
+                                        <td
+                                          key={cat.key}
+                                          onClick={() => {
+                                            setRekapSelectedCategoryKey(cat.key);
+                                            setRekapViewMode('kategori');
+                                          }}
+                                          title={`Klik untuk melihat rincian ${cat.title}`}
+                                          className="py-2.5 px-2 text-center tabular-nums cursor-pointer hover:bg-blue-100/60 transition"
+                                        >
+                                          <span className="font-extrabold text-slate-800 text-xs block">{s}</span>
+                                          {rankPill}
+                                        </td>
+                                      );
+                                    })}
+
+                                    <td className="py-3 px-3 text-center font-black text-amber-950 bg-amber-50 text-base tabular-nums">
+                                      {item.calc.grandTotal}
+                                    </td>
+                                    <td className="py-3 px-3 text-center font-semibold text-slate-700 tabular-nums">
+                                      {item.calc.grandPct.toFixed(1)}%
+                                    </td>
+                                    <td className="py-3 px-3 text-center">{statusBadge}</td>
+                                    <td className="py-3 px-3 text-center no-print">
+                                      <div className="flex items-center justify-center gap-1">
+                                        <button
+                                          onClick={() => {
+                                            setPrintPesertaId(item.id);
+                                            setModalPrintOpen(true);
+                                          }}
+                                          title="Cetak Lembar Nilai"
+                                          className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg cursor-pointer"
+                                        >
+                                          <Printer className="w-4 h-4" />
+                                        </button>
+                                        {!isUserRole && (
+                                          <button
+                                            onClick={() => {
+                                              setActivePesertaId(item.id);
+                                              setCurrentTab(categories[0].key);
+                                            }}
+                                            title="Input / Edit Nilai"
+                                            className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg cursor-pointer"
+                                          >
+                                            <Edit className="w-4 h-4" />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* 2. SEKSI JUARA UMUM TINGKAT SLTA */}
+                {(jenjangFilter === 'all' || jenjangFilter === 'SLTA') && (() => {
+                  const sltaItems = overallStandingsData
+                    .filter(item => item.jenjang === 'SLTA')
+                    .sort((a, b) => {
+                      if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+                        return (a.jenjangRank || 999) - (b.jenjangRank || 999);
+                      }
+                      if (a.calc.mandatoryCompleted) return -1;
+                      if (b.calc.mandatoryCompleted) return 1;
+                      return (a.nomor || '').localeCompare(b.nomor || '');
+                    });
+
+                  const j1 = sltaItems.find(t => t.jenjangRank === 1 && t.calc.mandatoryCompleted);
+                  const j2 = sltaItems.find(t => t.jenjangRank === 2 && t.calc.mandatoryCompleted);
+                  const j3 = sltaItems.find(t => t.jenjangRank === 3 && t.calc.mandatoryCompleted);
+
+                  return (
+                    <div className="bg-white rounded-2xl shadow-md border-2 border-indigo-200 overflow-hidden">
+                      {/* Banner Header Juara Umum SLTA */}
+                      <div className="p-4 sm:p-5 bg-gradient-to-r from-slate-950 via-indigo-950 to-purple-950 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="p-3 bg-amber-400 text-amber-950 rounded-2xl shadow-md">
+                            <Trophy className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-indigo-500/30 text-indigo-200 border border-indigo-400/30">
+                                Klasemen Mandiri
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-400 text-amber-950">
+                                Tingkat SLTA (SMA / SMK / MA)
+                              </span>
+                            </div>
+                            <h2 className="text-lg sm:text-xl font-black uppercase tracking-tight text-white mt-1">
+                              PIALA BERGILIR JUARA UMUM TINGKAT SLTA
+                            </h2>
+                            <p className="text-xs text-indigo-200">
+                              Akumulasi nilai seluruh mata lomba khusus jenjang SMA / SMK / MA (Maks. {activeCalc?.maxGrandTotal || 1200} Poin).
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold bg-indigo-800/80 px-3 py-1 rounded-full border border-indigo-300/30">
+                            {sltaItems.length} Kontingen SLTA
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Podium Juara Umum SLTA (Emas, Perak, Perunggu) */}
+                      <div className="p-4 sm:p-5 bg-slate-50 border-b border-slate-200">
+                        <div className="text-xs font-black uppercase tracking-wider text-indigo-900 mb-3 flex items-center gap-1.5">
+                          <Crown className="w-4 h-4 text-amber-500" />
+                          <span>Podium Juara Umum Tingkat SLTA</span>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          {/* Juara Umum 2 SLTA (Perak) */}
+                          <div className={`p-4 rounded-2xl border transition order-2 md:order-1 ${
+                            j2 ? 'bg-white border-slate-300 shadow-sm' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-300 text-slate-900 shadow-xs">
+                                <Medal className="w-3.5 h-3.5" /> Juara Umum 2 SLTA
+                              </span>
+                              <span className="text-xs font-bold text-slate-500">Perak</span>
+                            </div>
+                            {j2 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j2.sekolah}</h4>
+                                <p className="text-xs text-indigo-600 font-semibold">{j2.peleton || `No. ${j2.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
+                                  <span className="text-xs text-slate-500">Total Nilai:</span>
+                                  <span className="text-lg font-black text-slate-800">{j2.calc.grandTotal} <span className="text-xs font-normal text-slate-500">/ {j2.calc.maxGrandTotal} ({j2.calc.grandPct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+
+                          {/* Juara Umum 1 SLTA (Emas - Podium Utama) */}
+                          <div className={`p-4 sm:p-5 rounded-2xl border-2 transition order-1 md:order-2 ${
+                            j1 ? 'bg-gradient-to-b from-amber-50/90 via-amber-50/40 to-white border-amber-400 shadow-md ring-2 ring-amber-400/30' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-sm">
+                                <Crown className="w-4 h-4 text-amber-900" /> Juara Umum 1 SLTA
+                              </span>
+                              <span className="text-xs font-black text-amber-700 uppercase tracking-wider">Piala Bergilir 🏆</span>
+                            </div>
+                            {j1 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-lg leading-tight truncate">{j1.sekolah}</h4>
+                                <p className="text-xs text-indigo-600 font-bold">{j1.peleton || `No. ${j1.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-amber-200">
+                                  <span className="text-xs text-amber-900 font-bold">Skor Tertinggi:</span>
+                                  <span className="text-2xl font-black text-amber-950">{j1.calc.grandTotal} <span className="text-xs font-normal text-slate-600">/ {j1.calc.maxGrandTotal} ({j1.calc.grandPct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+
+                          {/* Juara Umum 3 SLTA (Perunggu) */}
+                          <div className={`p-4 rounded-2xl border transition order-3 ${
+                            j3 ? 'bg-white border-amber-200 shadow-sm' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white shadow-xs">
+                                <Award className="w-3.5 h-3.5" /> Juara Umum 3 SLTA
+                              </span>
+                              <span className="text-xs font-bold text-amber-700">Perunggu</span>
+                            </div>
+                            {j3 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j3.sekolah}</h4>
+                                <p className="text-xs text-indigo-600 font-semibold">{j3.peleton || `No. ${j3.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
+                                  <span className="text-xs text-slate-500">Total Nilai:</span>
+                                  <span className="text-lg font-black text-slate-800">{j3.calc.grandTotal} <span className="text-xs font-normal text-slate-500">/ {j3.calc.maxGrandTotal} ({j3.calc.grandPct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Tabel Klasemen SLTA */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm border-collapse">
+                          <thead className="bg-indigo-50/70 text-slate-700 text-xs uppercase font-bold tracking-wider border-b border-indigo-200">
+                            <tr>
+                              <th className="py-3 px-3 text-center w-12">No</th>
+                              <th className="py-3 px-3 text-center w-36">Peringkat SLTA</th>
+                              <th className="py-3 px-3 text-center w-16">No</th>
+                              <th className="py-3 px-4 min-w-[200px]">Nama Sekolah & Regu (SLTA)</th>
+                              {categories.map(cat => (
+                                <th
+                                  key={cat.key}
+                                  onClick={() => {
+                                    setRekapSelectedCategoryKey(cat.key);
+                                    setRekapViewMode('kategori');
+                                  }}
+                                  title={`Klik untuk melihat rincian ${cat.title}`}
+                                  className="py-3 px-2 text-center text-[11px] whitespace-nowrap cursor-pointer hover:bg-indigo-100 transition"
+                                >
+                                  <span className="underline decoration-dotted decoration-indigo-500 font-black">{cat.shortTitle}</span><br />
+                                  <span className="text-[10px] text-slate-500 font-normal">Max {cat.maxPoints}</span>
+                                </th>
+                              ))}
+                              <th className="py-3 px-3 text-center w-28 bg-amber-50 text-amber-950 font-black">
+                                Total Nilai<br />
+                                <span className="text-[10px] text-amber-600 font-normal">Max {activeCalc?.maxGrandTotal}</span>
+                              </th>
+                              <th className="py-3 px-3 text-center w-20">Persen</th>
+                              <th className="py-3 px-3 text-center w-28">Status</th>
+                              <th className="py-3 px-3 text-center w-28 no-print">Aksi</th>
                             </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200 font-medium">
+                            {sltaItems.length === 0 ? (
+                              <tr>
+                                <td colSpan={8 + categories.length} className="py-8 text-center text-slate-400">
+                                  Tidak ada peserta tingkat SLTA ditemukan.
+                                </td>
+                              </tr>
+                            ) : (
+                              sltaItems.map((item, index) => {
+                                const displayRank = item.jenjangRank;
+                                let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
+                                let rowHighlight = '';
+
+                                if (item.calc.mandatoryCompleted && displayRank !== null) {
+                                  if (displayRank === 1) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-xs">
+                                        <Crown className="w-3.5 h-3.5" /> Juara Umum 1
+                                      </span>
+                                    );
+                                    rowHighlight = 'bg-amber-50/50';
+                                  } else if (displayRank === 2) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-300 text-slate-900 shadow-xs">
+                                        <Medal className="w-3.5 h-3.5" /> Juara Umum 2
+                                      </span>
+                                    );
+                                    rowHighlight = 'bg-slate-50';
+                                  } else if (displayRank === 3) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white shadow-xs">
+                                        <Award className="w-3.5 h-3.5" /> Juara Umum 3
+                                      </span>
+                                    );
+                                  } else {
+                                    rankBadge = (
+                                      <span className="font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
+                                        Peringkat {displayRank} SLTA
+                                      </span>
+                                    );
+                                  }
+                                }
+
+                                const statusBadge = item.calc.mandatoryCompleted ? (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
+                                    Lengkap
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
+                                    Proses ({item.calc.completedCategoriesCount}/{item.calc.totalCategoriesCount})
+                                  </span>
+                                );
+
+                                return (
+                                  <tr key={item.id} className={`hover:bg-indigo-50/40 transition ${rowHighlight}`}>
+                                    <td className="py-3 px-3 text-center text-slate-400">{index + 1}</td>
+                                    <td className="py-3 px-3 text-center">{rankBadge}</td>
+                                    <td className="py-3 px-3 text-center font-bold text-slate-700">{item.nomor}</td>
+                                    <td className="py-3 px-4">
+                                      <strong className="text-slate-900 block leading-tight">{item.sekolah}</strong>
+                                      {item.peleton ? (
+                                        <span className="text-xs text-indigo-600 font-semibold">{item.peleton}</span>
+                                      ) : (
+                                        <span className="text-xs text-slate-400 italic">Tanpa Nama Regu</span>
+                                      )}
+                                    </td>
+
+                                    {/* Kolom Tiap Mata Lomba (Peringkat SLTA Mandiri) */}
+                                    {categories.map(cat => {
+                                      const s = item.calc.categorySummaries[cat.key]?.sum || 0;
+                                      const isDone = item.calc.categorySummaries[cat.key]?.isComplete;
+                                      const cRank = item.catRanks[cat.key]?.jenjangRank;
+
+                                      let rankPill = null;
+                                      if (isDone && cRank !== null && cRank !== undefined) {
+                                        if (cRank === 1) {
+                                          rankPill = (
+                                            <span className="block text-[9px] font-black text-amber-900 bg-amber-200/90 rounded px-1 py-0.2 mt-0.5">
+                                              🥇 #1
+                                            </span>
+                                          );
+                                        } else if (cRank === 2) {
+                                          rankPill = (
+                                            <span className="block text-[9px] font-black text-slate-800 bg-slate-200 rounded px-1 py-0.2 mt-0.5">
+                                              🥈 #2
+                                            </span>
+                                          );
+                                        } else if (cRank === 3) {
+                                          rankPill = (
+                                            <span className="block text-[9px] font-black text-amber-900 bg-amber-100 rounded px-1 py-0.2 mt-0.5">
+                                              🥉 #3
+                                            </span>
+                                          );
+                                        } else {
+                                          rankPill = (
+                                            <span className="block text-[9px] font-bold text-slate-500 bg-slate-100 rounded px-1 py-0.2 mt-0.5">
+                                              #{cRank}
+                                            </span>
+                                          );
+                                        }
+                                      }
+
+                                      return (
+                                        <td
+                                          key={cat.key}
+                                          onClick={() => {
+                                            setRekapSelectedCategoryKey(cat.key);
+                                            setRekapViewMode('kategori');
+                                          }}
+                                          title={`Klik untuk melihat rincian ${cat.title}`}
+                                          className="py-2.5 px-2 text-center tabular-nums cursor-pointer hover:bg-indigo-100/60 transition"
+                                        >
+                                          <span className="font-extrabold text-slate-800 text-xs block">{s}</span>
+                                          {rankPill}
+                                        </td>
+                                      );
+                                    })}
+
+                                    <td className="py-3 px-3 text-center font-black text-amber-950 bg-amber-50 text-base tabular-nums">
+                                      {item.calc.grandTotal}
+                                    </td>
+                                    <td className="py-3 px-3 text-center font-semibold text-slate-700 tabular-nums">
+                                      {item.calc.grandPct.toFixed(1)}%
+                                    </td>
+                                    <td className="py-3 px-3 text-center">{statusBadge}</td>
+                                    <td className="py-3 px-3 text-center no-print">
+                                      <div className="flex items-center justify-center gap-1">
+                                        <button
+                                          onClick={() => {
+                                            setPrintPesertaId(item.id);
+                                            setModalPrintOpen(true);
+                                          }}
+                                          title="Cetak Lembar Nilai"
+                                          className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg cursor-pointer"
+                                        >
+                                          <Printer className="w-4 h-4" />
+                                        </button>
+                                        {!isUserRole && (
+                                          <button
+                                            onClick={() => {
+                                              setActivePesertaId(item.id);
+                                              setCurrentTab(categories[0].key);
+                                            }}
+                                            title="Input / Edit Nilai"
+                                            className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg cursor-pointer"
+                                          >
+                                            <Edit className="w-4 h-4" />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
-            {/* ============================================== */}
+            {/* ==================================================== */}
+            {/* VIEW 2: PERINGKAT PER KATEGORI (SLTP & SLTA TERPISAH) */}
+            {/* ==================================================== */}
+            {rekapViewMode === 'kategori' && (
+              <div className="space-y-8">
+                {/* 1. SEKSI KATEGORI TINGKAT SLTP */}
+                {(jenjangFilter === 'all' || jenjangFilter === 'SLTP') && (() => {
+                  const catData = allCategoriesRankings[rekapSelectedCategoryKey];
+                  const sltpList = catData ? catData.leaderboardSLTP.filter(item => {
+                    const q = searchQuery.toLowerCase().trim();
+                    const matchSearch =
+                      item.nomor.toLowerCase().includes(q) ||
+                      (item.peleton || '').toLowerCase().includes(q) ||
+                      item.sekolah.toLowerCase().includes(q);
+                    if (!matchSearch) return false;
+                    if (statusFilter === 'completed') return item.catSummary.isComplete;
+                    if (statusFilter === 'pending') return !item.catSummary.isComplete;
+                    return true;
+                  }) : [];
+
+                  const j1 = catData?.topThreeSLTP.find(t => t.rank === 1);
+                  const j2 = catData?.topThreeSLTP.find(t => t.rank === 2);
+                  const j3 = catData?.topThreeSLTP.find(t => t.rank === 3);
+
+                  return (
+                    <div className="bg-white rounded-2xl shadow-md border-2 border-blue-200 overflow-hidden">
+                      <div className="p-4 bg-gradient-to-r from-blue-950 via-blue-900 to-indigo-900 text-white flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2.5 bg-blue-600 text-white rounded-xl shadow">
+                            <Medal className="w-5 h-5 text-amber-300" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-blue-500/30 text-blue-200 border border-blue-400/30">
+                                Peringkat Mandiri
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-400 text-amber-950">
+                                Tingkat SLTP (SMP / MTs)
+                              </span>
+                            </div>
+                            <h3 className="text-base sm:text-lg font-black uppercase tracking-wide text-white mt-0.5">
+                              JUARA KATEGORI: {rekapActiveCategoryObj.title.toUpperCase()} • TINGKAT SLTP
+                            </h3>
+                          </div>
+                        </div>
+                        <span className="text-xs font-bold bg-blue-800 px-3 py-1 rounded-full border border-blue-400/30">
+                          {sltpList.length} Peserta SLTP
+                        </span>
+                      </div>
+
+                      {/* Podium Juara Kategori SLTP */}
+                      <div className="p-4 sm:p-5 bg-slate-50 border-b border-slate-200">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          {/* Juara 2 SLTP */}
+                          <div className={`p-4 rounded-2xl border transition order-2 md:order-1 ${
+                            j2 ? 'bg-white border-slate-300 shadow-sm' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-200 text-slate-800">
+                                <Medal className="w-3.5 h-3.5 text-slate-600" /> Juara 2 SLTP ({rekapActiveCategoryObj.shortTitle})
+                              </span>
+                              <span className="text-xs font-bold text-slate-500">Perak</span>
+                            </div>
+                            {j2 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j2.participant.sekolah}</h4>
+                                <p className="text-xs text-blue-600 font-semibold">{j2.participant.peleton || `No. ${j2.participant.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
+                                  <span className="text-xs text-slate-500">Nilai Perolehan:</span>
+                                  <span className="text-lg font-black text-slate-800">{j2.score} <span className="text-xs font-normal text-slate-500">/ {rekapActiveCategoryObj.maxPoints} ({j2.pct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+
+                          {/* Juara 1 SLTP */}
+                          <div className={`p-4 sm:p-5 rounded-2xl border-2 transition order-1 md:order-2 ${
+                            j1 ? 'bg-gradient-to-b from-amber-50/90 via-amber-50/40 to-white border-amber-400 shadow-md ring-2 ring-amber-400/30' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-sm">
+                                <Crown className="w-4 h-4 text-amber-900" /> Juara 1 SLTP ({rekapActiveCategoryObj.shortTitle})
+                              </span>
+                              <span className="text-xs font-black text-amber-700 uppercase tracking-wider">Terbaik SLTP 🥇</span>
+                            </div>
+                            {j1 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-lg leading-tight truncate">{j1.participant.sekolah}</h4>
+                                <p className="text-xs text-blue-600 font-bold">{j1.participant.peleton || `No. ${j1.participant.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-amber-200">
+                                  <span className="text-xs text-amber-900 font-bold">Skor Tertinggi:</span>
+                                  <span className="text-xl font-black text-amber-950">{j1.score} <span className="text-xs font-normal text-slate-600">/ {rekapActiveCategoryObj.maxPoints} ({j1.pct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+
+                          {/* Juara 3 SLTP */}
+                          <div className={`p-4 rounded-2xl border transition order-3 ${
+                            j3 ? 'bg-white border-amber-200 shadow-sm' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white">
+                                <Award className="w-3.5 h-3.5" /> Juara 3 SLTP ({rekapActiveCategoryObj.shortTitle})
+                              </span>
+                              <span className="text-xs font-bold text-amber-700">Perunggu</span>
+                            </div>
+                            {j3 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j3.participant.sekolah}</h4>
+                                <p className="text-xs text-blue-600 font-semibold">{j3.participant.peleton || `No. ${j3.participant.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
+                                  <span className="text-xs text-slate-500">Nilai Perolehan:</span>
+                                  <span className="text-lg font-black text-slate-800">{j3.score} <span className="text-xs font-normal text-slate-500">/ {rekapActiveCategoryObj.maxPoints} ({j3.pct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Tabel Skor Kriteria SLTP */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm border-collapse">
+                          <thead className="bg-blue-50/70 text-slate-700 text-xs uppercase font-bold tracking-wider border-b border-blue-200">
+                            <tr>
+                              <th className="py-3 px-3 text-center w-12">No</th>
+                              <th className="py-3 px-3 text-center w-32">Peringkat SLTP</th>
+                              <th className="py-3 px-3 text-center w-16">No</th>
+                              <th className="py-3 px-4 min-w-[200px]">Nama Sekolah & Regu (SLTP)</th>
+                              {rekapActiveCategoryObj.criteria.map(crit => (
+                                <th
+                                  key={crit.no}
+                                  title={`Kriteria ${crit.no}: ${crit.name}`}
+                                  className="py-3 px-2 text-center text-[11px] whitespace-nowrap cursor-help bg-slate-50"
+                                >
+                                  K{crit.no}<br />
+                                  <span className="text-[10px] text-slate-400 font-normal">Max {crit.weights[4]}</span>
+                                </th>
+                              ))}
+                              <th className="py-3 px-3 text-center w-28 bg-amber-50 text-amber-950 font-black">
+                                Subtotal<br />
+                                <span className="text-[10px] text-amber-600 font-normal">Max {rekapActiveCategoryObj.maxPoints}</span>
+                              </th>
+                              <th className="py-3 px-3 text-center w-20">Persen</th>
+                              <th className="py-3 px-3 text-center w-28">Status</th>
+                              <th className="py-3 px-3 text-center w-24 no-print">Aksi</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200 font-medium">
+                            {sltpList.length === 0 ? (
+                              <tr>
+                                <td colSpan={8 + rekapActiveCategoryObj.criteria.length} className="py-8 text-center text-slate-400">
+                                  Tidak ada data peserta SLTP ditemukan pada kategori ini.
+                                </td>
+                              </tr>
+                            ) : (
+                              sltpList.map((item, index) => {
+                                const activeRank = item.jenjangCatRank;
+                                let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
+                                let rowHighlight = '';
+
+                                if (item.catSummary.isComplete && activeRank !== null) {
+                                  if (activeRank === 1) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-xs">
+                                        <Crown className="w-3.5 h-3.5" /> Juara 1
+                                      </span>
+                                    );
+                                    rowHighlight = 'bg-amber-50/50';
+                                  } else if (activeRank === 2) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-300 text-slate-900 shadow-xs">
+                                        <Medal className="w-3.5 h-3.5" /> Juara 2
+                                      </span>
+                                    );
+                                    rowHighlight = 'bg-slate-50';
+                                  } else if (activeRank === 3) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white shadow-xs">
+                                        <Award className="w-3.5 h-3.5" /> Juara 3
+                                      </span>
+                                    );
+                                  } else {
+                                    rankBadge = (
+                                      <span className="font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
+                                        Peringkat {activeRank}
+                                      </span>
+                                    );
+                                  }
+                                }
+
+                                const statusBadge = item.catSummary.isComplete ? (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
+                                    Lengkap
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
+                                    Proses ({item.catSummary.count}/{item.catSummary.totalCriteria})
+                                  </span>
+                                );
+
+                                return (
+                                  <tr key={item.id} className={`hover:bg-blue-50/40 transition ${rowHighlight}`}>
+                                    <td className="py-3 px-3 text-center text-slate-400">{index + 1}</td>
+                                    <td className="py-3 px-3 text-center">{rankBadge}</td>
+                                    <td className="py-3 px-3 text-center font-bold text-slate-700">{item.nomor}</td>
+                                    <td className="py-3 px-4">
+                                      <strong className="text-slate-900 block leading-tight">{item.sekolah}</strong>
+                                      {item.peleton ? (
+                                        <span className="text-xs text-blue-600 font-semibold">{item.peleton}</span>
+                                      ) : (
+                                        <span className="text-xs text-slate-400 italic">Tanpa Nama Regu</span>
+                                      )}
+                                    </td>
+
+                                    {rekapActiveCategoryObj.criteria.map(crit => {
+                                      const val = item.catScores[crit.no];
+                                      return (
+                                        <td key={crit.no} className="py-3 px-2 text-center font-semibold text-slate-700 tabular-nums">
+                                          {val !== undefined && val !== null ? val : '-'}
+                                        </td>
+                                      );
+                                    })}
+
+                                    <td className="py-3 px-3 text-center font-black text-amber-950 bg-amber-50 text-base tabular-nums">
+                                      {item.catSummary.sum}
+                                    </td>
+                                    <td className="py-3 px-3 text-center font-semibold text-slate-700 tabular-nums">
+                                      {item.catSummary.pct.toFixed(1)}%
+                                    </td>
+                                    <td className="py-3 px-3 text-center">{statusBadge}</td>
+                                    <td className="py-3 px-3 text-center no-print">
+                                      {!isUserRole && (
+                                        <button
+                                          onClick={() => {
+                                            setActivePesertaId(item.id);
+                                            setCurrentTab(rekapActiveCategoryObj.key);
+                                          }}
+                                          title="Input / Edit Nilai Kategori Ini"
+                                          className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg cursor-pointer"
+                                        >
+                                          <Edit className="w-4 h-4" />
+                                        </button>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* 2. SEKSI KATEGORI TINGKAT SLTA */}
+                {(jenjangFilter === 'all' || jenjangFilter === 'SLTA') && (() => {
+                  const catData = allCategoriesRankings[rekapSelectedCategoryKey];
+                  const sltaList = catData ? catData.leaderboardSLTA.filter(item => {
+                    const q = searchQuery.toLowerCase().trim();
+                    const matchSearch =
+                      item.nomor.toLowerCase().includes(q) ||
+                      (item.peleton || '').toLowerCase().includes(q) ||
+                      item.sekolah.toLowerCase().includes(q);
+                    if (!matchSearch) return false;
+                    if (statusFilter === 'completed') return item.catSummary.isComplete;
+                    if (statusFilter === 'pending') return !item.catSummary.isComplete;
+                    return true;
+                  }) : [];
+
+                  const j1 = catData?.topThreeSLTA.find(t => t.rank === 1);
+                  const j2 = catData?.topThreeSLTA.find(t => t.rank === 2);
+                  const j3 = catData?.topThreeSLTA.find(t => t.rank === 3);
+
+                  return (
+                    <div className="bg-white rounded-2xl shadow-md border-2 border-indigo-200 overflow-hidden">
+                      <div className="p-4 bg-gradient-to-r from-slate-950 via-indigo-950 to-purple-950 text-white flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2.5 bg-indigo-600 text-white rounded-xl shadow">
+                            <Medal className="w-5 h-5 text-amber-300" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-indigo-500/30 text-indigo-200 border border-indigo-400/30">
+                                Peringkat Mandiri
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-400 text-amber-950">
+                                Tingkat SLTA (SMA / SMK / MA)
+                              </span>
+                            </div>
+                            <h3 className="text-base sm:text-lg font-black uppercase tracking-wide text-white mt-0.5">
+                              JUARA KATEGORI: {rekapActiveCategoryObj.title.toUpperCase()} • TINGKAT SLTA
+                            </h3>
+                          </div>
+                        </div>
+                        <span className="text-xs font-bold bg-indigo-800 px-3 py-1 rounded-full border border-indigo-400/30">
+                          {sltaList.length} Peserta SLTA
+                        </span>
+                      </div>
+
+                      {/* Podium Juara Kategori SLTA */}
+                      <div className="p-4 sm:p-5 bg-slate-50 border-b border-slate-200">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          {/* Juara 2 SLTA */}
+                          <div className={`p-4 rounded-2xl border transition order-2 md:order-1 ${
+                            j2 ? 'bg-white border-slate-300 shadow-sm' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-200 text-slate-800">
+                                <Medal className="w-3.5 h-3.5 text-slate-600" /> Juara 2 SLTA ({rekapActiveCategoryObj.shortTitle})
+                              </span>
+                              <span className="text-xs font-bold text-slate-500">Perak</span>
+                            </div>
+                            {j2 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j2.participant.sekolah}</h4>
+                                <p className="text-xs text-indigo-600 font-semibold">{j2.participant.peleton || `No. ${j2.participant.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
+                                  <span className="text-xs text-slate-500">Nilai Perolehan:</span>
+                                  <span className="text-lg font-black text-slate-800">{j2.score} <span className="text-xs font-normal text-slate-500">/ {rekapActiveCategoryObj.maxPoints} ({j2.pct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+
+                          {/* Juara 1 SLTA */}
+                          <div className={`p-4 sm:p-5 rounded-2xl border-2 transition order-1 md:order-2 ${
+                            j1 ? 'bg-gradient-to-b from-amber-50/90 via-amber-50/40 to-white border-amber-400 shadow-md ring-2 ring-amber-400/30' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-sm">
+                                <Crown className="w-4 h-4 text-amber-900" /> Juara 1 SLTA ({rekapActiveCategoryObj.shortTitle})
+                              </span>
+                              <span className="text-xs font-black text-amber-700 uppercase tracking-wider">Terbaik SLTA 🥇</span>
+                            </div>
+                            {j1 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-lg leading-tight truncate">{j1.participant.sekolah}</h4>
+                                <p className="text-xs text-indigo-600 font-bold">{j1.participant.peleton || `No. ${j1.participant.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-amber-200">
+                                  <span className="text-xs text-amber-900 font-bold">Skor Tertinggi:</span>
+                                  <span className="text-xl font-black text-amber-950">{j1.score} <span className="text-xs font-normal text-slate-600">/ {rekapActiveCategoryObj.maxPoints} ({j1.pct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+
+                          {/* Juara 3 SLTA */}
+                          <div className={`p-4 rounded-2xl border transition order-3 ${
+                            j3 ? 'bg-white border-amber-200 shadow-sm' : 'bg-slate-100/60 border-dashed border-slate-300 opacity-60'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white">
+                                <Award className="w-3.5 h-3.5" /> Juara 3 SLTA ({rekapActiveCategoryObj.shortTitle})
+                              </span>
+                              <span className="text-xs font-bold text-amber-700">Perunggu</span>
+                            </div>
+                            {j3 ? (
+                              <div>
+                                <h4 className="font-black text-slate-900 text-base leading-tight truncate">{j3.participant.sekolah}</h4>
+                                <p className="text-xs text-indigo-600 font-semibold">{j3.participant.peleton || `No. ${j3.participant.nomor}`}</p>
+                                <div className="mt-3 flex items-baseline justify-between pt-2 border-t border-slate-100">
+                                  <span className="text-xs text-slate-500">Nilai Perolehan:</span>
+                                  <span className="text-lg font-black text-slate-800">{j3.score} <span className="text-xs font-normal text-slate-500">/ {rekapActiveCategoryObj.maxPoints} ({j3.pct.toFixed(1)}%)</span></span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Tabel Skor Kriteria SLTA */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm border-collapse">
+                          <thead className="bg-indigo-50/70 text-slate-700 text-xs uppercase font-bold tracking-wider border-b border-indigo-200">
+                            <tr>
+                              <th className="py-3 px-3 text-center w-12">No</th>
+                              <th className="py-3 px-3 text-center w-32">Peringkat SLTA</th>
+                              <th className="py-3 px-3 text-center w-16">No</th>
+                              <th className="py-3 px-4 min-w-[200px]">Nama Sekolah & Regu (SLTA)</th>
+                              {rekapActiveCategoryObj.criteria.map(crit => (
+                                <th
+                                  key={crit.no}
+                                  title={`Kriteria ${crit.no}: ${crit.name}`}
+                                  className="py-3 px-2 text-center text-[11px] whitespace-nowrap cursor-help bg-slate-50"
+                                >
+                                  K{crit.no}<br />
+                                  <span className="text-[10px] text-slate-400 font-normal">Max {crit.weights[4]}</span>
+                                </th>
+                              ))}
+                              <th className="py-3 px-3 text-center w-28 bg-amber-50 text-amber-950 font-black">
+                                Subtotal<br />
+                                <span className="text-[10px] text-amber-600 font-normal">Max {rekapActiveCategoryObj.maxPoints}</span>
+                              </th>
+                              <th className="py-3 px-3 text-center w-20">Persen</th>
+                              <th className="py-3 px-3 text-center w-28">Status</th>
+                              <th className="py-3 px-3 text-center w-24 no-print">Aksi</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200 font-medium">
+                            {sltaList.length === 0 ? (
+                              <tr>
+                                <td colSpan={8 + rekapActiveCategoryObj.criteria.length} className="py-8 text-center text-slate-400">
+                                  Tidak ada data peserta SLTA ditemukan pada kategori ini.
+                                </td>
+                              </tr>
+                            ) : (
+                              sltaList.map((item, index) => {
+                                const activeRank = item.jenjangCatRank;
+                                let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
+                                let rowHighlight = '';
+
+                                if (item.catSummary.isComplete && activeRank !== null) {
+                                  if (activeRank === 1) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-xs">
+                                        <Crown className="w-3.5 h-3.5" /> Juara 1
+                                      </span>
+                                    );
+                                    rowHighlight = 'bg-amber-50/50';
+                                  } else if (activeRank === 2) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-slate-300 text-slate-900 shadow-xs">
+                                        <Medal className="w-3.5 h-3.5" /> Juara 2
+                                      </span>
+                                    );
+                                    rowHighlight = 'bg-slate-50';
+                                  } else if (activeRank === 3) {
+                                    rankBadge = (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-700 text-white shadow-xs">
+                                        <Award className="w-3.5 h-3.5" /> Juara 3
+                                      </span>
+                                    );
+                                  } else {
+                                    rankBadge = (
+                                      <span className="font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
+                                        Peringkat {activeRank}
+                                      </span>
+                                    );
+                                  }
+                                }
+
+                                const statusBadge = item.catSummary.isComplete ? (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
+                                    Lengkap
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
+                                    Proses ({item.catSummary.count}/{item.catSummary.totalCriteria})
+                                  </span>
+                                );
+
+                                return (
+                                  <tr key={item.id} className={`hover:bg-indigo-50/40 transition ${rowHighlight}`}>
+                                    <td className="py-3 px-3 text-center text-slate-400">{index + 1}</td>
+                                    <td className="py-3 px-3 text-center">{rankBadge}</td>
+                                    <td className="py-3 px-3 text-center font-bold text-slate-700">{item.nomor}</td>
+                                    <td className="py-3 px-4">
+                                      <strong className="text-slate-900 block leading-tight">{item.sekolah}</strong>
+                                      {item.peleton ? (
+                                        <span className="text-xs text-indigo-600 font-semibold">{item.peleton}</span>
+                                      ) : (
+                                        <span className="text-xs text-slate-400 italic">Tanpa Nama Regu</span>
+                                      )}
+                                    </td>
+
+                                    {rekapActiveCategoryObj.criteria.map(crit => {
+                                      const val = item.catScores[crit.no];
+                                      return (
+                                        <td key={crit.no} className="py-3 px-2 text-center font-semibold text-slate-700 tabular-nums">
+                                          {val !== undefined && val !== null ? val : '-'}
+                                        </td>
+                                      );
+                                    })}
+
+                                    <td className="py-3 px-3 text-center font-black text-amber-950 bg-amber-50 text-base tabular-nums">
+                                      {item.catSummary.sum}
+                                    </td>
+                                    <td className="py-3 px-3 text-center font-semibold text-slate-700 tabular-nums">
+                                      {item.catSummary.pct.toFixed(1)}%
+                                    </td>
+                                    <td className="py-3 px-3 text-center">{statusBadge}</td>
+                                    <td className="py-3 px-3 text-center no-print">
+                                      {!isUserRole && (
+                                        <button
+                                          onClick={() => {
+                                            setActivePesertaId(item.id);
+                                            setCurrentTab(rekapActiveCategoryObj.key);
+                                          }}
+                                          title="Input / Edit Nilai Kategori Ini"
+                                          className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg cursor-pointer"
+                                        >
+                                          <Edit className="w-4 h-4" />
+                                        </button>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* ==================================================== */}
             {/* VIEW 3: MATRIKS RINGKASAN JUARA SEMUA KATEGORI */}
-            {/* ============================================== */}
+            {/* ==================================================== */}
             {rekapViewMode === 'ringkasan' && (
               <div className="space-y-4">
                 <div className="bg-slate-900 text-white p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-sm">
                   <div>
                     <h2 className="text-base sm:text-lg font-black uppercase tracking-wide flex items-center gap-2">
-                      <Crown className="w-5 h-5 text-amber-400" /> RINGKASAN JUARA SEMUA KATEGORI MATA LOMBA
+                      <Crown className="w-5 h-5 text-amber-400" /> RINGKASAN JUARA SEMUA KATEGORI (SLTP & SLTA MANDIRI)
                     </h2>
                     <p className="text-xs text-blue-300 mt-0.5">
-                      Daftar peraih Juara 1, 2, dan 3 untuk masing-masing dari 11 mata lomba (PBB, Variasi, Formasi, Danton, Devile, Gatur, Senam, Yel-Yel, Beladiri, Public Speaking, Kelengkapan Tenda).
+                      Daftar peraih Juara 1, 2, dan 3 untuk 11 mata lomba terpisah antara Tingkat SLTP dan Tingkat SLTA.
                     </p>
                   </div>
                   <button
@@ -6064,9 +6948,14 @@ export default function App() {
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {categories.map((cat, idx) => {
                     const catData = allCategoriesRankings[cat.key];
-                    const j1 = catData?.topThree.find(t => t.rank === 1);
-                    const j2 = catData?.topThree.find(t => t.rank === 2);
-                    const j3 = catData?.topThree.find(t => t.rank === 3);
+
+                    const sltp1 = catData?.topThreeSLTP.find(t => t.rank === 1);
+                    const sltp2 = catData?.topThreeSLTP.find(t => t.rank === 2);
+                    const sltp3 = catData?.topThreeSLTP.find(t => t.rank === 3);
+
+                    const slta1 = catData?.topThreeSLTA.find(t => t.rank === 1);
+                    const slta2 = catData?.topThreeSLTA.find(t => t.rank === 2);
+                    const slta3 = catData?.topThreeSLTA.find(t => t.rank === 3);
 
                     return (
                       <div
@@ -6089,73 +6978,82 @@ export default function App() {
                             </span>
                           </div>
 
-                          {/* Top 3 List */}
-                          <div className="py-3 space-y-2.5">
-                            {/* Juara 1 */}
-                            <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-amber-50/70 border border-amber-200/80">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="w-6 h-6 rounded-full bg-amber-400 text-amber-950 font-black text-xs flex items-center justify-center shrink-0 shadow-2xs">
-                                  1
-                                </span>
-                                <div className="min-w-0">
-                                  <p className="text-xs font-black text-slate-900 truncate">
-                                    {j1 ? j1.participant.sekolah : 'Belum Ada'}
-                                  </p>
-                                  {j1 && (
-                                    <p className="text-[10px] text-slate-500 truncate">
-                                      {j1.participant.peleton || `No. ${j1.participant.nomor}`}
-                                    </p>
-                                  )}
+                          <div className="py-3 space-y-4">
+                            {/* Sub-Podium SLTP */}
+                            {(jenjangFilter === 'all' || jenjangFilter === 'SLTP') && (
+                              <div className="space-y-1.5">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] font-black text-blue-900 uppercase tracking-wider flex items-center gap-1">
+                                    <Building2 className="w-3 h-3 text-blue-600" /> Juara SLTP (SMP/MTs)
+                                  </span>
                                 </div>
-                              </div>
-                              <span className="text-xs font-black text-amber-950 shrink-0 tabular-nums">
-                                {j1 ? `${j1.score} pt` : '-'}
-                              </span>
-                            </div>
 
-                            {/* Juara 2 */}
-                            <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="w-6 h-6 rounded-full bg-slate-300 text-slate-800 font-black text-xs flex items-center justify-center shrink-0">
-                                  2
-                                </span>
-                                <div className="min-w-0">
-                                  <p className="text-xs font-bold text-slate-800 truncate">
-                                    {j2 ? j2.participant.sekolah : 'Belum Ada'}
-                                  </p>
-                                  {j2 && (
-                                    <p className="text-[10px] text-slate-500 truncate">
-                                      {j2.participant.peleton || `No. ${j2.participant.nomor}`}
-                                    </p>
-                                  )}
+                                {/* SLTP 1 */}
+                                <div className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-amber-50/80 border border-amber-200 text-xs">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="w-5 h-5 rounded-full bg-amber-400 text-amber-950 font-black text-[10px] flex items-center justify-center shrink-0">1</span>
+                                    <span className="font-bold text-slate-900 truncate">{sltp1 ? sltp1.participant.sekolah : 'Belum Ada'}</span>
+                                  </div>
+                                  <span className="font-black text-amber-950 shrink-0 tabular-nums">{sltp1 ? `${sltp1.score} pt` : '-'}</span>
                                 </div>
-                              </div>
-                              <span className="text-xs font-bold text-slate-700 shrink-0 tabular-nums">
-                                {j2 ? `${j2.score} pt` : '-'}
-                              </span>
-                            </div>
 
-                            {/* Juara 3 */}
-                            <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-amber-50/30 border border-amber-100">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="w-6 h-6 rounded-full bg-amber-700 text-white font-black text-xs flex items-center justify-center shrink-0">
-                                  3
-                                </span>
-                                <div className="min-w-0">
-                                  <p className="text-xs font-bold text-slate-800 truncate">
-                                    {j3 ? j3.participant.sekolah : 'Belum Ada'}
-                                  </p>
-                                  {j3 && (
-                                    <p className="text-[10px] text-slate-500 truncate">
-                                      {j3.participant.peleton || `No. ${j3.participant.nomor}`}
-                                    </p>
-                                  )}
+                                {/* SLTP 2 */}
+                                <div className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-slate-50 border border-slate-200 text-xs">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="w-5 h-5 rounded-full bg-slate-300 text-slate-800 font-black text-[10px] flex items-center justify-center shrink-0">2</span>
+                                    <span className="font-bold text-slate-800 truncate">{sltp2 ? sltp2.participant.sekolah : 'Belum Ada'}</span>
+                                  </div>
+                                  <span className="font-bold text-slate-700 shrink-0 tabular-nums">{sltp2 ? `${sltp2.score} pt` : '-'}</span>
+                                </div>
+
+                                {/* SLTP 3 */}
+                                <div className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-amber-50/30 border border-amber-100 text-xs">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="w-5 h-5 rounded-full bg-amber-700 text-white font-black text-[10px] flex items-center justify-center shrink-0">3</span>
+                                    <span className="font-bold text-slate-800 truncate">{sltp3 ? sltp3.participant.sekolah : 'Belum Ada'}</span>
+                                  </div>
+                                  <span className="font-bold text-slate-700 shrink-0 tabular-nums">{sltp3 ? `${sltp3.score} pt` : '-'}</span>
                                 </div>
                               </div>
-                              <span className="text-xs font-bold text-slate-700 shrink-0 tabular-nums">
-                                {j3 ? `${j3.score} pt` : '-'}
-                              </span>
-                            </div>
+                            )}
+
+                            {/* Sub-Podium SLTA */}
+                            {(jenjangFilter === 'all' || jenjangFilter === 'SLTA') && (
+                              <div className="space-y-1.5 pt-1 border-t border-slate-100">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] font-black text-indigo-900 uppercase tracking-wider flex items-center gap-1">
+                                    <GraduationCap className="w-3.5 h-3.5 text-indigo-600" /> Juara SLTA (SMA/SMK)
+                                  </span>
+                                </div>
+
+                                {/* SLTA 1 */}
+                                <div className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-amber-50/80 border border-amber-200 text-xs">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="w-5 h-5 rounded-full bg-amber-400 text-amber-950 font-black text-[10px] flex items-center justify-center shrink-0">1</span>
+                                    <span className="font-bold text-slate-900 truncate">{slta1 ? slta1.participant.sekolah : 'Belum Ada'}</span>
+                                  </div>
+                                  <span className="font-black text-amber-950 shrink-0 tabular-nums">{slta1 ? `${slta1.score} pt` : '-'}</span>
+                                </div>
+
+                                {/* SLTA 2 */}
+                                <div className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-slate-50 border border-slate-200 text-xs">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="w-5 h-5 rounded-full bg-slate-300 text-slate-800 font-black text-[10px] flex items-center justify-center shrink-0">2</span>
+                                    <span className="font-bold text-slate-800 truncate">{slta2 ? slta2.participant.sekolah : 'Belum Ada'}</span>
+                                  </div>
+                                  <span className="font-bold text-slate-700 shrink-0 tabular-nums">{slta2 ? `${slta2.score} pt` : '-'}</span>
+                                </div>
+
+                                {/* SLTA 3 */}
+                                <div className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-amber-50/30 border border-amber-100 text-xs">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="w-5 h-5 rounded-full bg-amber-700 text-white font-black text-[10px] flex items-center justify-center shrink-0">3</span>
+                                    <span className="font-bold text-slate-800 truncate">{slta3 ? slta3.participant.sekolah : 'Belum Ada'}</span>
+                                  </div>
+                                  <span className="font-bold text-slate-700 shrink-0 tabular-nums">{slta3 ? `${slta3.score} pt` : '-'}</span>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </div>
 
@@ -6174,7 +7072,7 @@ export default function App() {
 
                           <button
                             onClick={() => handleExportExcelKategoriSpesifik(cat.key)}
-                            title={`Unduh Excel ${cat.shortTitle}`}
+                            title={`Unduh Excel ${cat.shortTitle} (Sheet SLTP & SLTA)`}
                             className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 transition cursor-pointer"
                           >
                             <FileSpreadsheet className="w-4 h-4" />
@@ -6212,6 +7110,8 @@ export default function App() {
             formBalok2={formBalok2}
             setFormBalok2={setFormBalok2}
             handleExportFormBalok2Excel={handleExportFormBalok2Excel}
+            blankoConfig={blankoConfig}
+            onOpenBlankoEditor={() => setModalBlankoEditorOpen(true)}
             showToast={showToast}
           />
         )}
@@ -8166,6 +9066,28 @@ export default function App() {
           }
         }}
         showToast={showToast}
+      />
+
+      {/* ==================================================== */}
+      {/* MODAL: EDIT MASTER FORMAT BLANGKO PENDAFTARAN */}
+      {/* ==================================================== */}
+      <BlankoEditorModal
+        isOpen={modalBlankoEditorOpen}
+        onClose={() => setModalBlankoEditorOpen(false)}
+        blankoConfig={blankoConfig}
+        onSaveBlankoConfig={async (newCfg) => {
+          const res = await saveBlankoConfigToCloud(newCfg);
+          if (res.success) {
+            setBlankoConfig(newCfg);
+            showToast('Format blangko berhasil disimpan ke Cloud!', 'success');
+            return true;
+          } else {
+            showToast(`Gagal menyimpan ke Cloud: ${res.error}`, 'error');
+            return false;
+          }
+        }}
+        showToast={showToast}
+        appLogo={appLogo}
       />
 
       {/* ==================================================== */}
