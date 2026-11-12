@@ -37,6 +37,8 @@ import {
   ChevronDown,
   X,
   Eye,
+  EyeOff,
+  Copy,
   Sliders,
   Footprints,
   Sparkles,
@@ -641,6 +643,7 @@ export default function App() {
             currentUser.username.toLowerCase() === 'administrator')))
   );
   const isAdminRole = Boolean(currentUser && (isSuperAdmin || currentUser.role === 'admin'));
+  const canViewPasswords = Boolean(currentUser && (currentUser.role === 'admin' || isSuperAdmin));
   const isUserRole = Boolean(currentUser && currentUser.role === 'user');
 
   const [loginUsername, setLoginUsername] = useState('');
@@ -740,6 +743,8 @@ export default function App() {
     pembinaName: '',
     contactWa: ''
   });
+  const [showUserPasswords, setShowUserPasswords] = useState<Record<string, boolean>>({});
+  const [showEditUserPassword, setShowEditUserPassword] = useState(false);
 
   // Modal Pratinjau & Cetak Format Blanko Lembar Penilaian Juri
   const [modalBlankSheetOpen, setModalBlankSheetOpen] = useState(false);
@@ -2450,9 +2455,52 @@ export default function App() {
           catScores: Record<number, number>;
           catRank: number | null;
           jenjangCatRank: number | null;
+          participantObj?: Participant;
+        }>;
+        leaderboardSLTP: Array<{
+          id: string;
+          nomor: string;
+          jenjang: SchoolLevel;
+          sekolah: string;
+          peleton: string;
+          tanggal: string;
+          juri: string;
+          calc: CalculatedScores;
+          catSummary: CategorySummary;
+          catScores: Record<number, number>;
+          catRank: number | null;
+          jenjangCatRank: number | null;
+          participantObj?: Participant;
+        }>;
+        leaderboardSLTA: Array<{
+          id: string;
+          nomor: string;
+          jenjang: SchoolLevel;
+          sekolah: string;
+          peleton: string;
+          tanggal: string;
+          juri: string;
+          calc: CalculatedScores;
+          catSummary: CategorySummary;
+          catScores: Record<number, number>;
+          catRank: number | null;
+          jenjangCatRank: number | null;
+          participantObj?: Participant;
         }>;
         rankMap: Map<string, number>;
         jenjangRankMap: Map<string, number>;
+        topThreeSLTP: Array<{
+          participant: Participant;
+          rank: number;
+          score: number;
+          pct: number;
+        }>;
+        topThreeSLTA: Array<{
+          participant: Participant;
+          rank: number;
+          score: number;
+          pct: number;
+        }>;
         topThree: Array<{
           participant: Participant;
           rank: number;
@@ -2968,24 +3016,6 @@ export default function App() {
 
     XLSX.writeFile(workbook, `Buku_Rekap_Lengkap_Lomba_PBB_PKS_SLTP_SLTA_${new Date().toISOString().slice(0, 10)}.xlsx`);
     showToast('Buku Rekap Master Lengkap (Multi-Sheet SLTP & SLTA Terpisah) berhasil diunduh.');
-  };
-        rowObj['Pencapaian (%)'] = Number(item.catSummary.pct.toFixed(2));
-        rowObj['Status Penilaian'] = item.catSummary.isComplete ? 'Selesai Dinilai' : 'Belum Lengkap';
-
-        return rowObj;
-      });
-
-      const wsCat = XLSX.utils.json_to_sheet(catRows);
-      // Nama sheet dibatasi maksimal 31 karakter untuk kompatibilitas Excel
-      const sheetName = `${idx + 1}. ${cat.shortTitle}`.slice(0, 30);
-      XLSX.utils.book_append_sheet(workbook, wsCat, sheetName);
-    });
-
-    XLSX.writeFile(
-      workbook,
-      `Buku_Rekap_Lengkap_Lomba_PBB_PKS_MultiSheet_${new Date().toISOString().slice(0, 10)}.xlsx`
-    );
-    showToast('Buku Rekap Multi-Sheet berhasil diunduh (Sheet Terpisah untuk Setiap Kategori)!');
   };
 
   // 4. Unduh Format Blanko Lembar Penilaian Juri Per-Kategori (.xlsx)
@@ -3982,6 +4012,7 @@ export default function App() {
                             onClick={() => {
                               setCurrentTab(cat.key);
                               setSidebarOpen(false);
+                              closeAllSidebarDropdowns();
                             }}
                             className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer ${
                               isCurrent
@@ -7392,16 +7423,28 @@ export default function App() {
                   </label>
                   <div className="relative">
                     <input
-                      type="text"
+                      type={showEditUserPassword && canViewPasswords ? "text" : "password"}
                       required
                       placeholder="Masukkan password baru untuk akun ini"
                       value={userFormData.password}
                       onChange={e => setUserFormData(prev => ({ ...prev, password: e.target.value }))}
-                      className="w-full border border-amber-300 bg-amber-50/30 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 outline-none font-mono font-bold text-slate-900"
+                      className="w-full border border-amber-300 bg-amber-50/30 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 outline-none font-mono font-bold text-slate-900 pr-10"
                     />
+                    {canViewPasswords && (
+                      <button
+                        type="button"
+                        onClick={() => setShowEditUserPassword(prev => !prev)}
+                        title={showEditUserPassword ? "Sembunyikan Password" : "Lihat Password"}
+                        className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                      >
+                        {showEditUserPassword ? <EyeOff className="w-4 h-4 text-amber-700" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    )}
                   </div>
                   <p className="text-[11px] text-slate-500 mt-1">
-                    Password saat ini ditampilkan di atas. Anda dapat langsung mengetikkan password baru untuk memperbarui login akun ini.
+                    {canViewPasswords
+                      ? "Password saat ini dapat dilihat dan diubah oleh Admin & Super Admin. Ketikkan password baru untuk mengganti."
+                      : "Password akun disembunyikan untuk menjaga privasi. Masukkan password baru jika ingin mereset login akun."}
                   </p>
                 </div>
 
@@ -7553,9 +7596,67 @@ export default function App() {
                               </div>
                             </td>
                             <td className="p-3">
-                              <span className="font-mono bg-slate-100 text-slate-800 px-2 py-0.5 rounded text-[11px] font-bold border border-slate-200">
-                                {u.password || '••••••'}
-                              </span>
+                              {canViewPasswords ? (
+                                (!isSuperAdmin && isUserSuperAdmin) ? (
+                                  <span
+                                    className="inline-flex items-center gap-1 font-mono bg-purple-50 text-purple-900 border border-purple-200 px-2 py-0.5 rounded text-[11px] font-bold"
+                                    title="Password Administrator Utama dilindungi dan hanya dapat dilihat oleh Super Admin"
+                                  >
+                                    <Lock className="w-3 h-3 text-purple-600" />
+                                    <span>••••••••</span>
+                                  </span>
+                                ) : (
+                                  <div className="flex items-center gap-1 font-mono">
+                                    <span
+                                      className={`px-2 py-0.5 rounded text-[11px] font-bold border transition ${
+                                        showUserPasswords[u.username]
+                                          ? 'bg-amber-50 text-amber-950 border-amber-300'
+                                          : 'bg-slate-100 text-slate-700 border-slate-200'
+                                      }`}
+                                    >
+                                      {showUserPasswords[u.username] ? (u.password || '-') : '••••••••'}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setShowUserPasswords(prev => ({
+                                          ...prev,
+                                          [u.username]: !prev[u.username]
+                                        }));
+                                      }}
+                                      title={showUserPasswords[u.username] ? "Sembunyikan Password" : "Lihat Password"}
+                                      className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer transition"
+                                    >
+                                      {showUserPasswords[u.username] ? (
+                                        <EyeOff className="w-3.5 h-3.5 text-amber-700" />
+                                      ) : (
+                                        <Eye className="w-3.5 h-3.5" />
+                                      )}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (navigator.clipboard && u.password) {
+                                          navigator.clipboard.writeText(u.password);
+                                          showToast(`Password akun @${u.username} disalin ke clipboard!`, 'info');
+                                        }
+                                      }}
+                                      title="Salin Password"
+                                      className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer transition"
+                                    >
+                                      <Copy className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                )
+                              ) : (
+                                <span
+                                  className="inline-flex items-center gap-1 font-mono bg-slate-100 text-slate-400 border border-slate-200 px-2 py-0.5 rounded text-[11px] font-medium"
+                                  title="Hanya akun Admin dan Super Admin yang berhak melihat password"
+                                >
+                                  <Lock className="w-3 h-3 text-slate-400" />
+                                  <span>••••••••</span>
+                                </span>
+                              )}
                             </td>
                             <td className="p-3 text-slate-700">{u.name}</td>
                             <td className="p-3 text-center">
