@@ -65,10 +65,13 @@ import {
   RefreshCw,
   Power,
   ShieldAlert,
-  CreditCard
+  CreditCard,
+  Activity
 } from 'lucide-react';
 import { RegistrationFormsView } from './components/RegistrationFormsView';
 import { RegistrationSubmissionsAdminView } from './components/RegistrationSubmissionsAdminView';
+import { MembersDirectoryView } from './components/MembersDirectoryView';
+import { ActivityLogsAdminView } from './components/ActivityLogsAdminView';
 import { PaymentGatewaySettingsModal } from './components/PaymentGatewaySettingsModal';
 import { BlankoEditorModal } from './components/BlankoEditorModal';
 import { LogoSettingModal } from './components/LogoSettingModal';
@@ -101,8 +104,17 @@ import {
   subscribeToBlankoConfig,
   saveBlankoConfigToCloud,
   BlankoConfig,
-  DEFAULT_BLANKO_CONFIG
+  DEFAULT_BLANKO_CONFIG,
+  subscribeToActivityLogs,
+  ActivityLogEntry,
+  ActivityCategory
 } from './lib/firebase';
+import {
+  recordUserActivity,
+  loadCachedActivityLogs,
+  persistCachedActivityLogs,
+  getTabReadableLabel
+} from './lib/activityLogger';
 
 // ==========================================
 // TYPES & CRITERIA DEFINITIONS
@@ -123,16 +135,23 @@ export interface AppUser {
   contactWa?: string;
 }
 
+export interface CalonPksStudentItem {
+  id: string;
+  nama: string;
+  tempatLahir: string;
+  tanggalLahir: string;
+  jk: 'Laki-laki' | 'Perempuan' | '';
+}
+
 export interface Criterion {
   no: number;
   name: string;
+  section?: string;
   weights: [number, number, number, number, number]; // [KS, K, C, B, A]
 }
 
 export type CategoryKey =
   | 'pbb'
-  | 'variasi'
-  | 'formasi'
   | 'danton'
   | 'devile'
   | 'gatur'
@@ -154,8 +173,8 @@ export interface CategoryConfig {
 
 export interface ParticipantScores {
   pbb: Record<number, number>;
-  variasi: Record<number, number>;
-  formasi: Record<number, number>;
+  variasi?: Record<number, number>; // Legacy key (auto-migrated ke pbb no 21-28)
+  formasi?: Record<number, number>; // Legacy key (auto-migrated ke pbb no 29-39)
   danton: Record<number, number>;
   devile: Record<number, number>;
   gatur: Record<number, number>;
@@ -213,55 +232,53 @@ export interface CalculatedScores {
 // DEFINISI RESMI SELURUH KRITERIA PENILAIAN LOMBA PBB & PKS
 // -------------------------------------------------------------
 
-// 1. GERAKAN DASAR PBB (20 KRITERIA - 500 POIN)
+// 1. PBB, VARIASI & FORMASI TERPADU (39 KRITERIA - 698 POIN)
+//    - A. Gerakan Dasar PBB (No. 1 - 20 : 500 Poin)
+//    - B. Gerakan Variasi    (No. 21 - 28: 84 Poin)
+//    - C. Gerakan Formasi    (No. 29 - 39: 114 Poin)
 const PBB_CRITERIA: Criterion[] = [
-  { no: 1, name: "Langkah biasa ke langkah tegap", weights: [5, 10, 15, 20, 25] },
-  { no: 2, name: "Ganti Langkah", weights: [6, 10, 15, 20, 26] },
-  { no: 3, name: "2x belok kanan", weights: [6, 12, 18, 24, 30] },
-  { no: 4, name: "Hormat kanan", weights: [6, 12, 18, 23, 28] },
-  { no: 5, name: "Langkah biasa", weights: [5, 10, 15, 20, 25] },
-  { no: 6, name: "Belok kanan (2 kali)", weights: [6, 12, 18, 24, 30] },
-  { no: 7, name: "Hadap kiri berhenti", weights: [5, 10, 15, 20, 25] },
-  { no: 8, name: "Jalan di tempat", weights: [5, 10, 15, 20, 25] },
-  { no: 9, name: "3 langkah ke belakang", weights: [5, 10, 15, 20, 25] },
-  { no: 10, name: "2 langkah ke kanan", weights: [5, 10, 15, 20, 25] },
-  { no: 11, name: "3 langkah ke depan", weights: [5, 10, 15, 20, 25] },
-  { no: 12, name: "2 langkah ke kiri", weights: [5, 10, 15, 20, 25] },
-  { no: 13, name: "Setengah Lengan lencang kanan", weights: [5, 10, 15, 20, 25] },
-  { no: 14, name: "Lencang kanan", weights: [5, 10, 15, 20, 25] },
-  { no: 15, name: "Serong kanan", weights: [4, 8, 12, 18, 22] },
-  { no: 16, name: "Periksa kerapihan", weights: [6, 12, 18, 24, 30] },
-  { no: 17, name: "Serong kiri", weights: [4, 8, 12, 18, 22] },
-  { no: 18, name: "Parade istirahat di tempat", weights: [4, 8, 12, 16, 20] },
-  { no: 19, name: "Hitung", weights: [4, 8, 12, 16, 20] },
-  { no: 20, name: "Hormat", weights: [4, 8, 12, 18, 22] }
-];
-
-// 2. GERAKAN VARIASI (8 KRITERIA - 84 POIN)
-const VARIASI_CRITERIA: Criterion[] = [
-  { no: 1, name: "Opening Variasi", weights: [2, 4, 6, 8, 10] },
-  { no: 2, name: "Kerapihan Barisan", weights: [2, 4, 6, 8, 10] },
-  { no: 3, name: "Kekompakan Gerak", weights: [2, 4, 6, 8, 10] },
-  { no: 4, name: "Semangat dan Penjiwaan", weights: [2, 4, 6, 8, 10] },
-  { no: 5, name: "Kesesuaian Pesan dan Gerakan", weights: [2, 4, 6, 8, 10] },
-  { no: 6, name: "Penguasaan Lapangan", weights: [4, 6, 8, 10, 12] },
-  { no: 7, name: "Kreativitas", weights: [2, 4, 6, 8, 10] },
-  { no: 8, name: "Tingkat Kesulitan", weights: [4, 6, 8, 10, 12] }
-];
-
-// 3. GERAKAN FORMASI (11 KRITERIA - 114 POIN)
-const FORMASI_CRITERIA: Criterion[] = [
-  { no: 1, name: "Proses Membuka Formasi", weights: [2, 4, 6, 8, 10] },
-  { no: 2, name: "Kerapihan Barisan", weights: [2, 4, 6, 8, 10] },
-  { no: 3, name: "Kekompakan Gerak", weights: [2, 4, 6, 8, 10] },
-  { no: 4, name: "Semangat dan Penjiwaan", weights: [2, 4, 6, 8, 10] },
-  { no: 5, name: "Penguasaan Lapangan", weights: [2, 4, 6, 8, 10] },
-  { no: 6, name: "Dinamis Struktur", weights: [4, 6, 8, 10, 12] },
-  { no: 7, name: "Bentuk Akhir Formasi", weights: [2, 4, 6, 8, 10] },
-  { no: 8, name: "Kreativitas", weights: [2, 4, 6, 8, 10] },
-  { no: 9, name: "Tingkat Kesulitan", weights: [4, 6, 8, 10, 12] },
-  { no: 10, name: "Proses Menutup Formasi", weights: [2, 4, 6, 8, 10] },
-  { no: 11, name: "Ending Celebration", weights: [2, 4, 6, 8, 10] }
+  // A. Gerakan Dasar PBB (20 Kriteria - 500 Poin)
+  { no: 1, section: 'A. Gerakan Dasar PBB', name: "Langkah biasa ke langkah tegap", weights: [5, 10, 15, 20, 25] },
+  { no: 2, section: 'A. Gerakan Dasar PBB', name: "Ganti Langkah", weights: [6, 10, 15, 20, 26] },
+  { no: 3, section: 'A. Gerakan Dasar PBB', name: "2x belok kanan", weights: [6, 12, 18, 24, 30] },
+  { no: 4, section: 'A. Gerakan Dasar PBB', name: "Hormat kanan", weights: [6, 12, 18, 23, 28] },
+  { no: 5, section: 'A. Gerakan Dasar PBB', name: "Langkah biasa", weights: [5, 10, 15, 20, 25] },
+  { no: 6, section: 'A. Gerakan Dasar PBB', name: "Belok kanan (2 kali)", weights: [6, 12, 18, 24, 30] },
+  { no: 7, section: 'A. Gerakan Dasar PBB', name: "Hadap kiri berhenti", weights: [5, 10, 15, 20, 25] },
+  { no: 8, section: 'A. Gerakan Dasar PBB', name: "Jalan di tempat", weights: [5, 10, 15, 20, 25] },
+  { no: 9, section: 'A. Gerakan Dasar PBB', name: "3 langkah ke belakang", weights: [5, 10, 15, 20, 25] },
+  { no: 10, section: 'A. Gerakan Dasar PBB', name: "2 langkah ke kanan", weights: [5, 10, 15, 20, 25] },
+  { no: 11, section: 'A. Gerakan Dasar PBB', name: "3 langkah ke depan", weights: [5, 10, 15, 20, 25] },
+  { no: 12, section: 'A. Gerakan Dasar PBB', name: "2 langkah ke kiri", weights: [5, 10, 15, 20, 25] },
+  { no: 13, section: 'A. Gerakan Dasar PBB', name: "Setengah Lengan lencang kanan", weights: [5, 10, 15, 20, 25] },
+  { no: 14, section: 'A. Gerakan Dasar PBB', name: "Lencang kanan", weights: [5, 10, 15, 20, 25] },
+  { no: 15, section: 'A. Gerakan Dasar PBB', name: "Serong kanan", weights: [4, 8, 12, 18, 22] },
+  { no: 16, section: 'A. Gerakan Dasar PBB', name: "Periksa kerapihan", weights: [6, 12, 18, 24, 30] },
+  { no: 17, section: 'A. Gerakan Dasar PBB', name: "Serong kiri", weights: [4, 8, 12, 18, 22] },
+  { no: 18, section: 'A. Gerakan Dasar PBB', name: "Parade istirahat di tempat", weights: [4, 8, 12, 16, 20] },
+  { no: 19, section: 'A. Gerakan Dasar PBB', name: "Hitung", weights: [4, 8, 12, 16, 20] },
+  { no: 20, section: 'A. Gerakan Dasar PBB', name: "Hormat", weights: [4, 8, 12, 18, 22] },
+  // B. Gerakan Variasi (8 Kriteria - 84 Poin)
+  { no: 21, section: 'B. Gerakan Variasi', name: "Opening Variasi", weights: [2, 4, 6, 8, 10] },
+  { no: 22, section: 'B. Gerakan Variasi', name: "Kerapihan Barisan", weights: [2, 4, 6, 8, 10] },
+  { no: 23, section: 'B. Gerakan Variasi', name: "Kekompakan Gerak", weights: [2, 4, 6, 8, 10] },
+  { no: 24, section: 'B. Gerakan Variasi', name: "Semangat dan Penjiwaan", weights: [2, 4, 6, 8, 10] },
+  { no: 25, section: 'B. Gerakan Variasi', name: "Kesesuaian Pesan dan Gerakan", weights: [2, 4, 6, 8, 10] },
+  { no: 26, section: 'B. Gerakan Variasi', name: "Penguasaan Lapangan", weights: [4, 6, 8, 10, 12] },
+  { no: 27, section: 'B. Gerakan Variasi', name: "Kreativitas", weights: [2, 4, 6, 8, 10] },
+  { no: 28, section: 'B. Gerakan Variasi', name: "Tingkat Kesulitan", weights: [4, 6, 8, 10, 12] },
+  // C. Gerakan Formasi (11 Kriteria - 114 Poin)
+  { no: 29, section: 'C. Gerakan Formasi', name: "Proses Membuka Formasi", weights: [2, 4, 6, 8, 10] },
+  { no: 30, section: 'C. Gerakan Formasi', name: "Kerapihan Barisan", weights: [2, 4, 6, 8, 10] },
+  { no: 31, section: 'C. Gerakan Formasi', name: "Kekompakan Gerak", weights: [2, 4, 6, 8, 10] },
+  { no: 32, section: 'C. Gerakan Formasi', name: "Semangat dan Penjiwaan", weights: [2, 4, 6, 8, 10] },
+  { no: 33, section: 'C. Gerakan Formasi', name: "Penguasaan Lapangan", weights: [2, 4, 6, 8, 10] },
+  { no: 34, section: 'C. Gerakan Formasi', name: "Dinamis Struktur", weights: [4, 6, 8, 10, 12] },
+  { no: 35, section: 'C. Gerakan Formasi', name: "Bentuk Akhir Formasi", weights: [2, 4, 6, 8, 10] },
+  { no: 36, section: 'C. Gerakan Formasi', name: "Kreativitas", weights: [2, 4, 6, 8, 10] },
+  { no: 37, section: 'C. Gerakan Formasi', name: "Tingkat Kesulitan", weights: [4, 6, 8, 10, 12] },
+  { no: 38, section: 'C. Gerakan Formasi', name: "Proses Menutup Formasi", weights: [2, 4, 6, 8, 10] },
+  { no: 39, section: 'C. Gerakan Formasi', name: "Ending Celebration", weights: [2, 4, 6, 8, 10] }
 ];
 
 // 4. DANTON (6 KRITERIA - 50 POIN)
@@ -274,15 +291,13 @@ const DANTON_CRITERIA: Criterion[] = [
   { no: 6, name: "Penguasaan Materi Lomba", weights: [3, 5, 7, 9, 11] }
 ];
 
-// 5. DEVILE DAN UNIFORM (7 KRITERIA - MAKS 60 POIN)
+// 5. DEVILE DAN UNIFORM (5 KRITERIA - MAKS 50 POIN)
 const DEVILE_CRITERIA: Criterion[] = [
   { no: 1, name: "Kekompakan Gerakan", weights: [2, 4, 6, 8, 10] },
   { no: 2, name: "Cara Penghormatan", weights: [2, 4, 6, 8, 10] },
   { no: 3, name: "Keserasian Gerakan", weights: [2, 4, 6, 8, 10] },
   { no: 4, name: "Langkah Tegap", weights: [2, 4, 6, 8, 10] },
-  { no: 5, name: "Kelengkapan Atribut", weights: [2, 4, 6, 8, 10] },
-  { no: 6, name: "Keserasian", weights: [2, 4, 6, 8, 10] },
-  { no: 7, name: "Kerapihan", weights: [2, 4, 6, 8, 10] }
+  { no: 5, name: "Kelengkapan Atribut", weights: [2, 4, 6, 8, 10] }
 ];
 
 // 6. GATUR LANTAS (15 KRITERIA @ MAKS 10 POIN = 150 POIN)
@@ -353,34 +368,16 @@ const TENDA_CRITERIA: Criterion[] = [
   { no: 6, name: "Kelengkapan Peralatan Wajib", weights: [2, 4, 6, 8, 10] }
 ];
 
-// KONFIGURASI DEFAULT KATEGORI
+// KONFIGURASI DEFAULT KATEGORI (9 KATEGORI TERPADU)
 const DEFAULT_CATEGORIES: CategoryConfig[] = [
   {
     key: 'pbb',
-    title: 'Gerakan Dasar PBB',
-    shortTitle: 'PBB',
+    title: 'PBB, Variasi & Formasi',
+    shortTitle: 'PBB & Varfor',
     group: 'PBB & Variasi',
-    maxPoints: 500,
+    maxPoints: 698,
     isMandatory: true,
     criteria: PBB_CRITERIA
-  },
-  {
-    key: 'variasi',
-    title: 'Gerakan Variasi',
-    shortTitle: 'Variasi',
-    group: 'PBB & Variasi',
-    maxPoints: 84,
-    isMandatory: true,
-    criteria: VARIASI_CRITERIA
-  },
-  {
-    key: 'formasi',
-    title: 'Gerakan Formasi',
-    shortTitle: 'Formasi',
-    group: 'PBB & Variasi',
-    maxPoints: 114,
-    isMandatory: true,
-    criteria: FORMASI_CRITERIA
   },
   {
     key: 'danton',
@@ -396,7 +393,7 @@ const DEFAULT_CATEGORIES: CategoryConfig[] = [
     title: 'Devile dan Uniform',
     shortTitle: 'Devile',
     group: 'Lantas & Lapangan',
-    maxPoints: 60,
+    maxPoints: 50,
     isMandatory: true,
     criteria: DEVILE_CRITERIA
   },
@@ -459,7 +456,7 @@ const DEFAULT_CATEGORIES: CategoryConfig[] = [
 // DEFAULT SYSTEM USERS
 const DEFAULT_SYSTEM_USERS: AppUser[] = [
   { username: 'admin', password: 'admin123', name: 'Administrator Utama (Super Admin)', role: 'superadmin', isCustom: false },
-  { username: 'administrator', password: 'administrator123', name: 'Administrator Utama (Super Admin)', role: 'superadmin', isCustom: false },
+  { username: 'administrator', password: 'adminstrator123', name: 'Administrator Utama (Super Admin)', role: 'superadmin', isCustom: false },
   { username: 'panitia', password: 'panitia123', name: 'Admin Panitia (Akses Terbatas)', role: 'admin', isCustom: false },
   { username: 'juri1', password: 'juri123', name: 'Aiptu Budi Santoso (Juri Lapangan)', role: 'juri', isCustom: false },
   { username: 'user1', password: 'user123', name: 'Kontingen / Tamu Resmi', role: 'user', isCustom: false }
@@ -495,11 +492,13 @@ const INITIAL_PESERTA: Participant[] = [
     tanggal: "2026-03-20",
     juri: "Aiptu Budi Santoso (Juri Lapangan)",
     scores: {
-      pbb: { 1:25, 2:26, 3:30, 4:28, 5:25, 6:30, 7:25, 8:25, 9:25, 10:25, 11:25, 12:25, 13:25, 14:25, 15:22, 16:30, 17:22, 18:20, 19:20, 20:22 },
-      variasi: { 1:10, 2:10, 3:8, 4:10, 5:10, 6:12, 7:10, 8:12 },
-      formasi: { 1:10, 2:10, 3:10, 4:10, 5:10, 6:12, 7:10, 8:10, 9:12, 10:10, 11:10 },
+      pbb: {
+        1:25, 2:26, 3:30, 4:28, 5:25, 6:30, 7:25, 8:25, 9:25, 10:25, 11:25, 12:25, 13:25, 14:25, 15:22, 16:30, 17:22, 18:20, 19:20, 20:22,
+        21:10, 22:10, 23:8, 24:10, 25:10, 26:12, 27:10, 28:12,
+        29:10, 30:10, 31:10, 32:10, 33:10, 34:12, 35:10, 36:10, 37:12, 38:10, 39:10
+      },
       danton: { 1:7, 2:7, 3:7, 4:7, 5:11, 6:11 },
-      devile: { 1:10, 2:8, 3:10, 4:10, 5:8, 6:10, 7:10 },
+      devile: { 1:10, 2:8, 3:10, 4:10, 5:8 },
       gatur: { 1:10, 2:10, 3:10, 4:10, 5:10, 6:10, 7:8, 8:10, 9:10, 10:8, 11:10, 12:10, 13:10, 14:10, 15:10 },
       senam: { 1:10, 2:10, 3:8, 4:10, 5:10, 6:10 },
       yelyel: { 1:25, 2:25, 3:20, 4:25 },
@@ -517,11 +516,13 @@ const INITIAL_PESERTA: Participant[] = [
     tanggal: "2026-03-20",
     juri: "Aiptu Hendra Wijaya",
     scores: {
-      pbb: { 1:20, 2:20, 3:24, 4:23, 5:20, 6:24, 7:20, 8:20, 9:20, 10:20, 11:20, 12:20, 13:20, 14:20, 15:18, 16:24, 17:18, 18:16, 19:16, 20:18 },
-      variasi: { 1:8, 2:8, 3:8, 4:8, 5:8, 6:10, 7:8, 8:10 },
-      formasi: { 1:8, 2:8, 3:8, 4:8, 5:8, 6:10, 7:8, 8:8, 9:10, 10:8, 11:8 },
+      pbb: {
+        1:20, 2:20, 3:24, 4:23, 5:20, 6:24, 7:20, 8:20, 9:20, 10:20, 11:20, 12:20, 13:20, 14:20, 15:18, 16:24, 17:18, 18:16, 19:16, 20:18,
+        21:8, 22:8, 23:8, 24:8, 25:8, 26:10, 27:8, 28:10,
+        29:8, 30:8, 31:8, 32:8, 33:8, 34:10, 35:8, 36:8, 37:10, 38:8, 39:8
+      },
       danton: { 1:6, 2:6, 3:6, 4:6, 5:9, 6:9 },
-      devile: { 1:8, 2:8, 3:8, 4:8, 5:8, 6:8, 7:8 },
+      devile: { 1:8, 2:8, 3:8, 4:8, 5:8 },
       gatur: { 1:8, 2:8, 3:8, 4:8, 5:8, 6:8, 7:8, 8:8, 9:8, 10:8, 11:8, 12:8, 13:8, 14:8, 15:8 },
       senam: { 1:8, 2:8, 3:8, 4:8, 5:8, 6:8 },
       yelyel: { 1:20, 2:20, 3:20, 4:20 },
@@ -531,6 +532,180 @@ const INITIAL_PESERTA: Participant[] = [
     }
   }
 ];
+
+// =============================================================
+// MIGRASI OTOMATIS DATA LAMA (VARIASI & FORMASI -> PBB TERPADU)
+// =============================================================
+export function normalizeParticipantScores(p: Participant): { participant: Participant; migrated: boolean } {
+  if (!p) return { participant: p, migrated: false };
+  const rawScores: any = p.scores || {};
+  const legacyVariasi: Record<string, number> | undefined = rawScores.variasi;
+  const legacyFormasi: Record<string, number> | undefined = rawScores.formasi;
+  const rawPhotos: any = p.formPhotos || {};
+
+  const rawDevile: Record<string, any> = rawScores.devile || {};
+  const hasVariasiField = 'variasi' in rawScores;
+  const hasFormasiField = 'formasi' in rawScores;
+  const hasVariasiPhoto = 'variasi' in rawPhotos;
+  const hasFormasiPhoto = 'formasi' in rawPhotos;
+  const hasLegacyDevilePoints =
+    typeof rawDevile === 'object' &&
+    ('6' in rawDevile || '7' in rawDevile || 6 in rawDevile || 7 in rawDevile);
+
+  if (!hasVariasiField && !hasFormasiField && !hasVariasiPhoto && !hasFormasiPhoto && !hasLegacyDevilePoints) {
+    return { participant: p, migrated: false };
+  }
+
+  const nextPbb: Record<number, number> = { ...(rawScores.pbb || {}) };
+
+  if (legacyVariasi && typeof legacyVariasi === 'object') {
+    Object.entries(legacyVariasi).forEach(([k, v]) => {
+      const idx = Number(k);
+      if (!Number.isNaN(idx) && idx >= 1 && idx <= 8 && v !== undefined && v !== null) {
+        const targetNo = 20 + idx; // 21 - 28
+        if (nextPbb[targetNo] === undefined || nextPbb[targetNo] === null) {
+          nextPbb[targetNo] = Number(v);
+        }
+      }
+    });
+  }
+
+  if (legacyFormasi && typeof legacyFormasi === 'object') {
+    Object.entries(legacyFormasi).forEach(([k, v]) => {
+      const idx = Number(k);
+      if (!Number.isNaN(idx) && idx >= 1 && idx <= 11 && v !== undefined && v !== null) {
+        const targetNo = 28 + idx; // 29 - 39
+        if (nextPbb[targetNo] === undefined || nextPbb[targetNo] === null) {
+          nextPbb[targetNo] = Number(v);
+        }
+      }
+    });
+  }
+
+  const nextDevile: Record<number, number> = {};
+  if (rawDevile && typeof rawDevile === 'object') {
+    Object.entries(rawDevile).forEach(([k, v]) => {
+      const idx = Number(k);
+      if (!Number.isNaN(idx) && idx !== 6 && idx !== 7 && v !== undefined && v !== null) {
+        nextDevile[idx] = Number(v);
+      }
+    });
+  }
+
+  const cleanedScores: ParticipantScores = {
+    pbb: nextPbb,
+    danton: rawScores.danton || {},
+    devile: nextDevile,
+    gatur: rawScores.gatur || {},
+    senam: rawScores.senam || {},
+    yelyel: rawScores.yelyel || {},
+    beladiri: rawScores.beladiri || {},
+    speaking: rawScores.speaking || {},
+    tenda: rawScores.tenda || {}
+  };
+
+  let cleanedPhotos = p.formPhotos;
+  if (hasVariasiPhoto || hasFormasiPhoto) {
+    const nextPhotos: Partial<Record<CategoryKey, FormPhotoData>> = {};
+    Object.entries(rawPhotos).forEach(([k, v]) => {
+      if (k !== 'variasi' && k !== 'formasi' && v) {
+        nextPhotos[k as CategoryKey] = v as FormPhotoData;
+      }
+    });
+    if (!nextPhotos.pbb && (rawPhotos.variasi || rawPhotos.formasi)) {
+      nextPhotos.pbb = rawPhotos.variasi || rawPhotos.formasi;
+    }
+    cleanedPhotos = nextPhotos;
+  }
+
+  return {
+    participant: {
+      ...p,
+      scores: cleanedScores,
+      ...(cleanedPhotos ? { formPhotos: cleanedPhotos } : {})
+    },
+    migrated: true
+  };
+}
+
+export function normalizeCategoriesConfig(rawCats: any[]): { categories: CategoryConfig[]; migrated: boolean } {
+  if (!Array.isArray(rawCats) || rawCats.length === 0) {
+    return { categories: DEFAULT_CATEGORIES, migrated: false };
+  }
+
+  const oldPbb = rawCats.find((c: any) => c?.key === 'pbb');
+  const oldVariasi = rawCats.find((c: any) => c?.key === 'variasi');
+  const oldFormasi = rawCats.find((c: any) => c?.key === 'formasi');
+  const oldDevile = rawCats.find((c: any) => c?.key === 'devile');
+
+  const needsMerge =
+    Boolean(oldVariasi) ||
+    Boolean(oldFormasi) ||
+    !oldPbb ||
+    !Array.isArray(oldPbb.criteria) ||
+    oldPbb.criteria.length !== PBB_CRITERIA.length ||
+    oldPbb.title === 'Gerakan Dasar PBB' ||
+    !oldPbb.criteria[0]?.section;
+
+  const needsDevileFix = Boolean(
+    oldDevile &&
+      (!Array.isArray(oldDevile.criteria) ||
+        oldDevile.criteria.length > 5 ||
+        oldDevile.criteria.some((cr: any) => cr?.no === 6 || cr?.no === 7) ||
+        (oldDevile.criteria.length === 5 && oldDevile.maxPoints === 60))
+  );
+
+  if (!needsMerge && !needsDevileFix) {
+    return { categories: rawCats as CategoryConfig[], migrated: false };
+  }
+
+  let nextCategories: CategoryConfig[];
+  if (needsMerge) {
+    const mergedMaxPoints =
+      oldVariasi || oldFormasi
+        ? (Number(oldPbb?.maxPoints ?? 500) || 500) +
+          (Number(oldVariasi?.maxPoints ?? 84) || 84) +
+          (Number(oldFormasi?.maxPoints ?? 114) || 114)
+        : Number(oldPbb?.maxPoints ?? 698) || 698;
+
+    const mergedPbb: CategoryConfig = {
+      key: 'pbb',
+      title: 'PBB, Variasi & Formasi',
+      shortTitle: 'PBB & Varfor',
+      group: 'PBB & Variasi',
+      maxPoints: mergedMaxPoints,
+      isMandatory: oldPbb?.isMandatory !== undefined ? Boolean(oldPbb.isMandatory) : true,
+      criteria: PBB_CRITERIA
+    };
+
+    const filteredOthers = rawCats.filter(
+      (c: any) => c && c.key !== 'pbb' && c.key !== 'variasi' && c.key !== 'formasi'
+    ) as CategoryConfig[];
+
+    nextCategories = [mergedPbb, ...filteredOthers];
+  } else {
+    nextCategories = rawCats as CategoryConfig[];
+  }
+
+  if (needsDevileFix) {
+    nextCategories = nextCategories.map(cat => {
+      if (cat.key !== 'devile') return cat;
+      const filteredCriteria = Array.isArray(cat.criteria)
+        ? cat.criteria.filter(cr => cr && cr.no !== 6 && cr.no !== 7)
+        : DEVILE_CRITERIA;
+      return {
+        ...cat,
+        maxPoints: 50,
+        criteria: filteredCriteria.length > 0 ? filteredCriteria : DEVILE_CRITERIA
+      };
+    });
+  }
+
+  return {
+    categories: nextCategories,
+    migrated: true
+  };
+}
 
 // FUNGSI PERHITUNGAN NILAI OTOMATIS
 export function calculateAllCategories(
@@ -607,14 +782,21 @@ export default function App() {
       if (stored) {
         const parsed: AppUser[] = JSON.parse(stored);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          if (!parsed.some(u => u.username.toLowerCase() === 'administrator')) {
+          const idx = parsed.findIndex(u => u.username.toLowerCase() === 'administrator');
+          if (idx === -1) {
             parsed.push({
               username: 'administrator',
-              password: 'administrator123',
+              password: 'adminstrator123',
               name: 'Administrator Utama (Super Admin)',
               role: 'superadmin',
               isCustom: false
             });
+          } else if (parsed[idx].password === 'administrator123' || parsed[idx].password === 'administrator1234') {
+            parsed[idx] = {
+              ...parsed[idx],
+              username: 'administrator',
+              password: 'adminstrator123'
+            };
           }
           return parsed;
         }
@@ -625,6 +807,8 @@ export default function App() {
     return DEFAULT_SYSTEM_USERS;
   });
 
+  const AUTH_LOGIN_TIME_KEY = 'pks_session_login_time_v1';
+
   const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
     try {
       const stored = sessionStorage.getItem(AUTH_KEY);
@@ -633,6 +817,22 @@ export default function App() {
       return null;
     }
   });
+
+  const [sessionLoginAt, setSessionLoginAt] = useState<string | null>(() => {
+    try {
+      const existing = sessionStorage.getItem(AUTH_LOGIN_TIME_KEY);
+      if (existing) return existing;
+      if (sessionStorage.getItem(AUTH_KEY)) {
+        const fallbackIso = new Date().toISOString();
+        sessionStorage.setItem(AUTH_LOGIN_TIME_KEY, fallbackIso);
+        return fallbackIso;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  });
+  const [dashboardNow, setDashboardNow] = useState<Date>(() => new Date());
 
   // Role Access Hierarchy: Super Admin (Utama) vs Admin Panitia (Akses Terbatas) vs Juri vs Sekolah vs Tamu
   const isSuperAdmin = Boolean(
@@ -659,7 +859,17 @@ export default function App() {
       const stored = localStorage.getItem(CONFIG_STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const { categories: normalized, migrated } = normalizeCategoriesConfig(parsed);
+          if (migrated) {
+            try {
+              localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(normalized));
+            } catch {
+              // ignore
+            }
+          }
+          return normalized;
+        }
       }
     } catch {
       // fallback
@@ -673,7 +883,22 @@ export default function App() {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed.pesertaList)) return parsed.pesertaList;
+        if (Array.isArray(parsed.pesertaList)) {
+          let anyMigrated = false;
+          const normalizedList = parsed.pesertaList.map((p: Participant) => {
+            const res = normalizeParticipantScores(p);
+            if (res.migrated) anyMigrated = true;
+            return res.participant;
+          });
+          if (anyMigrated) {
+            try {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: normalizedList }));
+            } catch {
+              // ignore
+            }
+          }
+          return normalizedList;
+        }
       }
     } catch {
       // fallback
@@ -745,6 +970,8 @@ export default function App() {
   });
   const [showUserPasswords, setShowUserPasswords] = useState<Record<string, boolean>>({});
   const [showEditUserPassword, setShowEditUserPassword] = useState(false);
+  const [userCategoryTab, setUserCategoryTab] = useState<'all' | 'admin' | 'juri' | 'sekolah' | 'user'>('all');
+  const [userSearchQuery, setUserSearchQuery] = useState('');
 
   // Modal Pratinjau & Cetak Format Blanko Lembar Penilaian Juri
   const [modalBlankSheetOpen, setModalBlankSheetOpen] = useState(false);
@@ -864,6 +1091,44 @@ export default function App() {
   const [blankoConfig, setBlankoConfig] = useState<BlankoConfig>(DEFAULT_BLANKO_CONFIG);
   const [modalBlankoEditorOpen, setModalBlankoEditorOpen] = useState(false);
 
+  // Activity Logs State (Admin & Superadmin Audit Console)
+  const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>(() => loadCachedActivityLogs());
+  const lastLoggedTabKeyRef = useRef<string | null>(null);
+
+  const logActivity = (
+    actionCategory: ActivityCategory,
+    actionTitle: string,
+    details: string,
+    options?: {
+      actorOverride?: AppUser | null;
+      tabOverride?: string;
+      forceRefreshLocation?: boolean;
+    }
+  ) => {
+    const actor = options?.actorOverride !== undefined ? options.actorOverride : currentUser;
+    if (!actor || !actor.username) return;
+    const tabKey = options?.tabOverride || currentTab;
+    void recordUserActivity({
+      user: {
+        username: actor.username,
+        name: actor.name,
+        role: actor.role
+      },
+      actionCategory,
+      actionTitle,
+      details,
+      tabContext: getTabReadableLabel(tabKey),
+      forceRefreshLocation: options?.forceRefreshLocation,
+      onRecorded: newEntry => {
+        setActivityLogs(prev => {
+          const next = [newEntry, ...prev.filter(item => item.id !== newEntry.id)];
+          persistCachedActivityLogs(next);
+          return next;
+        });
+      }
+    });
+  };
+
   // School Self-Registration State (Layar Login)
   const [authViewTab, setAuthViewTab] = useState<'login' | 'register_sekolah'>('login');
   const [regJenjang, setRegJenjang] = useState<SchoolLevel>('SLTP');
@@ -878,6 +1143,9 @@ export default function App() {
   // Dashboard School Progress Filter States
   const [dashFilterJenjang, setDashFilterJenjang] = useState<'all' | 'SLTP' | 'SLTA'>('all');
   const [dashSearchSekolah, setDashSearchSekolah] = useState('');
+  const [dashAccountSearch, setDashAccountSearch] = useState('');
+  const [dashAccountRoleFilter, setDashAccountRoleFilter] = useState<'all' | 'superadmin' | 'admin' | 'juri' | 'sekolah' | 'user'>('all');
+  const [preselectedLogUsername, setPreselectedLogUsername] = useState<string | null>(null);
 
   // State 4 Kerangka Form Pendaftaran Resmi PKS & Polisi Pelajar
   const [formPolisiPelajar, setFormPolisiPelajar] = useState({
@@ -901,24 +1169,22 @@ export default function App() {
     alasan: 'Ingin mengabdi dan menegakkan ketertiban dan keselamatan di lingkungan sekolah.'
   });
 
-  const [formCalonPks, setFormCalonPks] = useState({
-    nama: 'Aisyah Putri Rahmadani',
-    nisn: '0078129845',
+  const [formCalonPks, setFormCalonPks] = useState<{
+    sekolah: string;
+    jenjang: SchoolLevel;
+    students: CalonPksStudentItem[];
+  }>({
     sekolah: 'SMA Negeri 1 Majalengka',
-    jenjang: 'SLTA' as SchoolLevel,
-    kelas: 'X-MIPA 2',
-    ttl: 'Majalengka, 22 April 2010',
-    jk: 'Perempuan',
-    agama: 'Islam',
-    alamat: 'Jl. Kartini No. 12, Majalengka',
-    noHp: '085712348900',
-    namaPembina: 'Drs. Supriyadi, M.Pd',
-    divisiMinat: 'Gatur Lantas & Keselamatan Jalan',
-    tinggiBadan: '160',
-    beratBadan: '48',
-    golDarah: 'A',
-    riwayatOrganisasi: 'Pramuka Penggalang Inti',
-    izinOrtu: true
+    jenjang: 'SLTA',
+    students: [
+      {
+        id: 'siswa-1',
+        nama: '',
+        tempatLahir: '',
+        tanggalLahir: '',
+        jk: 'Laki-laki'
+      }
+    ]
   });
 
   const [formBalok1, setFormBalok1] = useState({
@@ -949,12 +1215,65 @@ export default function App() {
     rekomendasiSatlantas: 'Memenuhi Syarat Kualifikasi Instruktur PKS Balok 2'
   });
 
-  // Proteksi Hak Akses Akun Tamu: Hanya bisa melihat data mentah, otomatis dialihkan dari tab rekap
+  // Proteksi Hak Akses Akun Tamu, Log Aktivitas Khusus Admin, & Pengalihan Tab Lama (Variasi/Formasi -> PBB Terpadu)
   useEffect(() => {
     if (currentUser?.role === 'user' && currentTab === 'rekap') {
       setCurrentTab('dashboard');
+    } else if (currentTab === 'log_aktivitas' && !isAdminRole) {
+      setCurrentTab('dashboard');
+    } else if (currentTab === 'variasi' || currentTab === 'formasi') {
+      setCurrentTab('pbb');
     }
+  }, [currentUser, currentTab, isAdminRole]);
+
+  // Jam real-time untuk kartu sesi & daftar waktu akun di Dashboard
+  useEffect(() => {
+    if (!currentUser || currentTab !== 'dashboard') return;
+    setDashboardNow(new Date());
+    const timer = window.setInterval(() => {
+      setDashboardNow(new Date());
+    }, 1000);
+    return () => window.clearInterval(timer);
   }, [currentUser, currentTab]);
+
+  // Catat Aktivitas Navigasi Tab/Menu secara otomatis untuk setiap akun
+  useEffect(() => {
+    if (!currentUser) {
+      lastLoggedTabKeyRef.current = null;
+      return;
+    }
+    const navSignature = `${currentUser.username}:${currentTab}`;
+    if (lastLoggedTabKeyRef.current === navSignature) return;
+    lastLoggedTabKeyRef.current = navSignature;
+    const tabLabel = getTabReadableLabel(currentTab);
+    void recordUserActivity({
+      user: {
+        username: currentUser.username,
+        name: currentUser.name,
+        role: currentUser.role
+      },
+      actionCategory: 'navigation',
+      actionTitle: `Membuka Menu ${tabLabel}`,
+      details: `Mengakses halaman ${tabLabel}`,
+      tabContext: tabLabel,
+      onRecorded: newEntry => {
+        setActivityLogs(prev => {
+          const next = [newEntry, ...prev.filter(item => item.id !== newEntry.id)];
+          persistCachedActivityLogs(next);
+          return next;
+        });
+      }
+    });
+  }, [currentUser, currentTab]);
+
+  useEffect(() => {
+    if ((rekapSelectedCategoryKey as string) === 'variasi' || (rekapSelectedCategoryKey as string) === 'formasi') {
+      setRekapSelectedCategoryKey('pbb');
+    }
+    if ((blankSheetCatKey as string) === 'variasi' || (blankSheetCatKey as string) === 'formasi') {
+      setBlankSheetCatKey('pbb');
+    }
+  }, [rekapSelectedCategoryKey, blankSheetCatKey]);
 
   // In-app Confirmation Modal
   const [confirmModal, setConfirmModal] = useState<{
@@ -993,6 +1312,7 @@ export default function App() {
     let unsubPayment: (() => void) | undefined;
     let unsubRegistrations: (() => void) | undefined;
     let unsubBlanko: (() => void) | undefined;
+    let unsubActivityLogs: (() => void) | undefined;
 
     const initCloud = async () => {
       try {
@@ -1010,9 +1330,16 @@ export default function App() {
             setCloudStatus('connected');
             setCloudLastSynced(new Date());
             if (cloudPeserta && cloudPeserta.length > 0) {
-              setPesertaList(cloudPeserta);
+              const normalizedList = cloudPeserta.map(p => {
+                const res = normalizeParticipantScores(p);
+                if (res.migrated) {
+                  saveParticipantToCloud(res.participant);
+                }
+                return res.participant;
+              });
+              setPesertaList(normalizedList);
               try {
-                localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: cloudPeserta }));
+                localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: normalizedList }));
               } catch {
                 // ignore
               }
@@ -1033,17 +1360,25 @@ export default function App() {
             setCloudStatus('connected');
             setCloudLastSynced(new Date());
             if (cloudUsers && cloudUsers.length > 0) {
-              const hasAdministrator = cloudUsers.some(u => u.username?.toLowerCase() === 'administrator');
-              if (!hasAdministrator) {
+              const adminIdx = cloudUsers.findIndex(u => u.username?.toLowerCase() === 'administrator');
+              if (adminIdx === -1) {
                 const adminAccount: AppUser = {
                   username: 'administrator',
-                  password: 'administrator123',
+                  password: 'adminstrator123',
                   name: 'Administrator Utama (Super Admin)',
                   role: 'superadmin',
                   isCustom: false
                 };
                 saveUserToCloud(adminAccount);
                 cloudUsers = [...cloudUsers, adminAccount];
+              } else if (cloudUsers[adminIdx].password === 'administrator123' || cloudUsers[adminIdx].password === 'administrator1234') {
+                const updatedAdmin: AppUser = {
+                  ...cloudUsers[adminIdx],
+                  username: 'administrator',
+                  password: 'adminstrator123'
+                };
+                saveUserToCloud(updatedAdmin);
+                cloudUsers = cloudUsers.map((u, i) => (i === adminIdx ? updatedAdmin : u));
               }
               setUsersList(cloudUsers);
               try {
@@ -1066,9 +1401,14 @@ export default function App() {
         unsubConfig = subscribeToConfig(
           cloudConfig => {
             if (cloudConfig && Array.isArray(cloudConfig) && cloudConfig.length > 0) {
-              setCategories(cloudConfig);
+              const { categories: normalizedCats, migrated } = normalizeCategoriesConfig(cloudConfig);
+              if (migrated) {
+                saveConfigToCloud(normalizedCats);
+              }
+              setCategories(normalizedCats);
+              setTempCategoriesConfig(normalizedCats);
               try {
-                localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(cloudConfig));
+                localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(normalizedCats));
               } catch {
                 // ignore
               }
@@ -1141,6 +1481,30 @@ export default function App() {
           err => console.error('Cloud blanko config sync error:', err)
         );
 
+        // 9. Subscribe to Activity Logs (Per-Account Audit Trail)
+        unsubActivityLogs = subscribeToActivityLogs(
+          cloudLogs => {
+            if (cloudLogs && cloudLogs.length > 0) {
+              setActivityLogs(prev => {
+                const mergedMap = new Map<string, ActivityLogEntry>();
+                cloudLogs.forEach(item => mergedMap.set(item.id, item));
+                // Retain recent local entries not yet synced
+                prev.forEach(item => {
+                  if (!mergedMap.has(item.id)) {
+                    mergedMap.set(item.id, item);
+                  }
+                });
+                const merged = Array.from(mergedMap.values()).sort((a, b) =>
+                  (b.timestampIso || '').localeCompare(a.timestampIso || '')
+                );
+                persistCachedActivityLogs(merged);
+                return merged;
+              });
+            }
+          },
+          err => console.error('Cloud activity logs sync error:', err)
+        );
+
         isInitialCloudSyncDone.current = true;
       } catch (err) {
         console.error('Cloud initialization failed:', err);
@@ -1159,6 +1523,7 @@ export default function App() {
       if (unsubPayment) unsubPayment();
       if (unsubRegistrations) unsubRegistrations();
       if (unsubBlanko) unsubBlanko();
+      if (unsubActivityLogs) unsubActivityLogs();
     };
   }, []);
 
@@ -1195,6 +1560,11 @@ export default function App() {
       console.error('Storage error', e);
     }
     await saveAppStatusToCloud(newStatus);
+    logActivity(
+      'data_edit',
+      'Ubah Status Operasional Aplikasi',
+      `Status aplikasi diubah menjadi ${newStatus.isActive ? 'AKTIF' : 'NONAKTIF'} (${newStatus.title}).`
+    );
   };
 
   // Save Users Data (Local Backup)
@@ -1278,10 +1648,23 @@ export default function App() {
         setLoginStepText(`Kredensial cocok! Menyiapkan sesi ${roleLabel}...`);
 
         setTimeout(() => {
+          const loginIso = new Date().toISOString();
           setIsLoggingIn(false);
           setCurrentUser(found);
+          setSessionLoginAt(loginIso);
           sessionStorage.setItem(AUTH_KEY, JSON.stringify(found));
+          try {
+            sessionStorage.setItem(AUTH_LOGIN_TIME_KEY, loginIso);
+          } catch {
+            // ignore
+          }
           showToast(`Selamat datang, ${found.name}!`);
+          logActivity(
+            'auth',
+            'Login ke Aplikasi',
+            `Berhasil masuk sebagai ${roleLabel} (@${found.username}).`,
+            { actorOverride: found, forceRefreshLocation: true }
+          );
         }, 550);
       } else {
         setIsLoggingIn(false);
@@ -1291,8 +1674,22 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    if (currentUser) {
+      logActivity(
+        'auth',
+        'Logout dari Aplikasi',
+        `Keluar dari sesi akun ${currentUser.name} (@${currentUser.username}).`
+      );
+    }
     setCurrentUser(null);
+    setSessionLoginAt(null);
+    setPreselectedLogUsername(null);
     sessionStorage.removeItem(AUTH_KEY);
+    try {
+      sessionStorage.removeItem(AUTH_LOGIN_TIME_KEY);
+    } catch {
+      // ignore
+    }
     showToast('Berhasil keluar dari akun.', 'info');
   };
 
@@ -1365,7 +1762,7 @@ export default function App() {
           tanggal: new Date().toISOString().split('T')[0],
           juri: 'Belum Ditentukan',
           scores: {
-            pbb: {}, variasi: {}, formasi: {}, danton: {},
+            pbb: {}, danton: {},
             devile: {}, gatur: {}, senam: {}, yelyel: {},
             beladiri: {}, speaking: {}, tenda: {}
           }
@@ -1382,13 +1779,22 @@ export default function App() {
         saveParticipantToCloud(newParticipant);
       }
 
+      const loginIso = new Date().toISOString();
       setIsRegisteringSchool(false);
       setCurrentUser(newSchoolUser);
+      setSessionLoginAt(loginIso);
       try {
         sessionStorage.setItem(AUTH_KEY, JSON.stringify(newSchoolUser));
+        sessionStorage.setItem(AUTH_LOGIN_TIME_KEY, loginIso);
       } catch {
         // ignore
       }
+      logActivity(
+        'registration',
+        'Registrasi Akun Sekolah Mandiri',
+        `Mendaftarkan akun sekolah ${regSekolah.trim()} (${regJenjang}) dengan username @${usernameLower}.`,
+        { actorOverride: newSchoolUser, forceRefreshLocation: true }
+      );
       showToast(`Registrasi Akun Sekolah ${regSekolah} berhasil! Selamat datang.`, 'success');
     }, 600);
   };
@@ -1417,6 +1823,7 @@ export default function App() {
         console.error('Storage error', err);
       }
       saveLogoToCloud(dataUrl);
+      logActivity('data_edit', 'Unggah Logo Aplikasi', 'Memperbarui gambar logo aplikasi dari perangkat.');
       showToast('Logo aplikasi berhasil diperbarui!', 'success');
       setModalLogoOpen(false);
     };
@@ -1435,6 +1842,7 @@ export default function App() {
       // ignore
     }
     saveLogoToCloud(null);
+    logActivity('data_edit', 'Reset Logo Aplikasi', 'Mengembalikan logo aplikasi ke lambang default PKS.');
     showToast('Logo dikembalikan ke lambang default PKS.', 'info');
     setModalLogoOpen(false);
   };
@@ -1453,6 +1861,7 @@ export default function App() {
       // ignore
     }
     saveLogoToCloud(logoToSave);
+    logActivity('data_edit', 'Ubah Logo Aplikasi', 'Menyimpan pembaruan logo aplikasi.');
     showToast('Logo aplikasi berhasil diperbarui!', 'success');
     setTempLogoUrl('');
     setModalLogoOpen(false);
@@ -1499,45 +1908,40 @@ export default function App() {
     ws['!cols'] = [{ wch: 32 }, { wch: 45 }, { wch: 30 }];
     XLSX.utils.book_append_sheet(wb, ws, 'Pendaftaran_Poljar');
     XLSX.writeFile(wb, `Form_Pendaftaran_Polisi_Pelajar_${formPolisiPelajar.nama.replace(/\s+/g, '_')}.xlsx`);
+    logActivity('export', 'Ekspor Excel Polisi Pelajar', `Mengunduh form Excel Polisi Pelajar atas nama ${formPolisiPelajar.nama}.`);
     showToast('Form Pendaftaran Polisi Pelajar berhasil diunduh (.xlsx)', 'success');
   };
 
   const handleExportFormCalonPksExcel = () => {
     const wb = XLSX.utils.book_new();
+    const studentRows = (formCalonPks.students || []).map((st, idx) => [
+      idx + 1,
+      st.nama || '-',
+      st.tempatLahir || '-',
+      st.tanggalLahir || '-',
+      st.jk || '-'
+    ]);
+
     const rows = [
-      ['FORMULIR PENDAFTARAN CALON ANGGOTA PATROLI KEAMANAN SEKOLAH (PKS)'],
+      ['FORMULIR PENDAFTARAN SISWA CALON ANGGOTA PKS'],
       ['KORPS PKS TINGKAT SLTP & SLTA TAHUN AJARAN 2026/2027'],
       [''],
-      ['A. IDENTITAS CALON ANGGOTA'],
-      ['1. Nama Lengkap', formCalonPks.nama],
-      ['2. NISN', formCalonPks.nisn],
-      ['3. Pangkalan Sekolah', formCalonPks.sekolah],
-      ['4. Jenjang', formCalonPks.jenjang],
-      ['5. Kelas', formCalonPks.kelas],
-      ['6. Tempat, Tanggal Lahir', formCalonPks.ttl],
-      ['7. Jenis Kelamin', formCalonPks.jk],
-      ['8. Agama', formCalonPks.agama],
-      ['9. Alamat Lengkap', formCalonPks.alamat],
-      ['10. No. Handphone', formCalonPks.noHp],
-      ['11. Pembina PKS Sekolah', formCalonPks.namaPembina],
-      ['12. Pilihan Divisi Peminatan', formCalonPks.divisiMinat],
+      ['Pangkalan Sekolah', formCalonPks.sekolah || '-'],
+      ['Jenjang Pendidikan', formCalonPks.jenjang || '-'],
+      ['Jumlah Siswa Terdaftar', `${(formCalonPks.students || []).length} Siswa`],
       [''],
-      ['B. FISIK & PENGALAMAN'],
-      ['1. Tinggi / Berat Badan', `${formCalonPks.tinggiBadan} cm / ${formCalonPks.beratBadan} kg`],
-      ['2. Golongan Darah', formCalonPks.golDarah],
-      ['3. Riwayat Organisasi', formCalonPks.riwayatOrganisasi],
-      ['4. Izin Orang Tua', formCalonPks.izinOrtu ? 'Sudah Mendapatkan Izin' : 'Belum'],
+      ['No', 'Nama Lengkap', 'Tempat Lahir', 'Tanggal Lahir', 'Jenis Kelamin'],
+      ...studentRows,
       [''],
-      ['Mengetahui,', '', 'Majalengka, ' + new Date().toLocaleDateString('id-ID')],
-      ['Pembina PKS Sekolah', '', 'Calon Anggota PKS'],
-      [''],
-      [''],
-      [`(${formCalonPks.namaPembina})`, '', `(${formCalonPks.nama})`]
+      ['Mengetahui,', '', '', 'Majalengka, ' + new Date().toLocaleDateString('id-ID')],
+      ['Pembina PKS Sekolah', '', '', 'Kepala Sekolah / Penanggung Jawab']
     ];
     const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols'] = [{ wch: 32 }, { wch: 45 }, { wch: 30 }];
+    ws['!cols'] = [{ wch: 8 }, { wch: 32 }, { wch: 22 }, { wch: 18 }, { wch: 18 }];
     XLSX.utils.book_append_sheet(wb, ws, 'Pendaftaran_PKS');
-    XLSX.writeFile(wb, `Form_Calon_Anggota_PKS_${formCalonPks.nama.replace(/\s+/g, '_')}.xlsx`);
+    const safeSchool = (formCalonPks.sekolah || 'Sekolah').replace(/\s+/g, '_');
+    XLSX.writeFile(wb, `Form_Calon_Anggota_PKS_${safeSchool}.xlsx`);
+    logActivity('export', 'Ekspor Excel Calon Anggota PKS', `Mengunduh form Excel Calon Anggota PKS (${formCalonPks.sekolah}).`);
     showToast('Form Pendaftaran Calon PKS berhasil diunduh (.xlsx)', 'success');
   };
 
@@ -1573,6 +1977,7 @@ export default function App() {
     ws['!cols'] = [{ wch: 35 }, { wch: 45 }, { wch: 30 }];
     XLSX.utils.book_append_sheet(wb, ws, 'Perkemahan_Balok1');
     XLSX.writeFile(wb, `Form_Perkemahan_Balok1_${formBalok1.sekolah.replace(/\s+/g, '_')}.xlsx`);
+    logActivity('export', 'Ekspor Excel Kemah Balok 1', `Mengunduh form Excel Perkemahan Balok 1 (${formBalok1.sekolah}).`);
     showToast('Form Perkemahan PKS Balok 1 berhasil diunduh (.xlsx)', 'success');
   };
 
@@ -1606,6 +2011,7 @@ export default function App() {
     ws['!cols'] = [{ wch: 35 }, { wch: 45 }, { wch: 30 }];
     XLSX.utils.book_append_sheet(wb, ws, 'Pendaftaran_Balok2');
     XLSX.writeFile(wb, `Form_Pendaftaran_PKS_Balok2_${formBalok2.namaPeserta.replace(/\s+/g, '_')}.xlsx`);
+    logActivity('export', 'Ekspor Excel PKS Balok 2', `Mengunduh form Excel PKS Balok 2 atas nama ${formBalok2.namaPeserta}.`);
     showToast('Form Pendaftaran PKS Balok 2 berhasil diunduh (.xlsx)', 'success');
   };
 
@@ -1725,6 +2131,7 @@ export default function App() {
       contactWa: ''
     });
     setUserFormTab('list');
+    logActivity('data_edit', 'Edit Akun Pengguna', `Memperbarui akun @${uname} (${dname}, peran: ${finalRole}).`);
     showToast(`Akun "${dname}" berhasil diperbarui & tersinkron ke Cloud!`, 'success');
   };
 
@@ -1767,6 +2174,7 @@ export default function App() {
     }
 
     const syncRes = await saveUserToCloud(newUser);
+    logActivity('data_edit', 'Tambah Akun Pengguna', `Membuat akun baru @${uname} (${dname}, peran: ${newUser.role}).`);
     if (syncRes.success) {
       setCloudLastSynced(new Date());
       showToast(`Pengguna baru "${dname}" (${newUser.role.toUpperCase()}) berhasil dibuat & tersinkron ke Cloud!`, 'success');
@@ -1818,6 +2226,7 @@ export default function App() {
           // ignore
         }
         await deleteUserFromCloud(usernameToDelete);
+        logActivity('data_delete', 'Hapus Akun Pengguna', `Menghapus akun pengguna @${usernameToDelete}.`);
         setCloudLastSynced(new Date());
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
         showToast('Akun pengguna berhasil dihapus dari Cloud & lokal.', 'info');
@@ -1935,6 +2344,163 @@ export default function App() {
     };
   }, [pesertaList, categories, dashFilterJenjang, dashSearchSekolah, currentUser]);
 
+  const formatDashboardDate = (isoOrDate?: string | Date | null): string | null => {
+    if (!isoOrDate) return null;
+    const d =
+      isoOrDate instanceof Date
+        ? isoOrDate
+        : /^\d{4}-\d{2}-\d{2}$/.test(isoOrDate)
+        ? new Date(`${isoOrDate}T00:00:00`)
+        : new Date(isoOrDate);
+    if (Number.isNaN(d.getTime())) return typeof isoOrDate === 'string' ? isoOrDate : null;
+    return new Intl.DateTimeFormat('id-ID', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric'
+    }).format(d);
+  };
+
+  const formatDashboardTimeHms = (isoOrDate?: string | Date | null): string | null => {
+    if (!isoOrDate) return null;
+    const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+    if (Number.isNaN(d.getTime())) return null;
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  };
+
+  const dashboardAccountTimeList = useMemo(() => {
+    interface AccountTimeItem {
+      username: string;
+      name: string;
+      role: string;
+      schoolName?: string;
+      isRegisteredUser: boolean;
+      totalActivities: number;
+      lastLoginIso: string | null;
+      lastLoginDate: string | null;
+      lastLoginTime: string | null;
+      lastActivityIso: string | null;
+      lastActivityDate: string | null;
+      lastActivityTime: string | null;
+      lastActivityTitle: string | null;
+    }
+
+    const map = new Map<string, AccountTimeItem>();
+
+    usersList.forEach(u => {
+      const key = u.username.trim().toLowerCase();
+      map.set(key, {
+        username: u.username,
+        name: u.name,
+        role: u.role,
+        schoolName: u.schoolName,
+        isRegisteredUser: true,
+        totalActivities: 0,
+        lastLoginIso: null,
+        lastLoginDate: null,
+        lastLoginTime: null,
+        lastActivityIso: null,
+        lastActivityDate: null,
+        lastActivityTime: null,
+        lastActivityTitle: null
+      });
+    });
+
+    activityLogs.forEach(log => {
+      const uname = (log.username || '').trim();
+      if (!uname) return;
+      const key = uname.toLowerCase();
+      let item = map.get(key);
+      if (!item) {
+        item = {
+          username: uname,
+          name: log.userName || uname,
+          role: log.userRole || 'user',
+          isRegisteredUser: false,
+          totalActivities: 0,
+          lastLoginIso: null,
+          lastLoginDate: null,
+          lastLoginTime: null,
+          lastActivityIso: null,
+          lastActivityDate: null,
+          lastActivityTime: null,
+          lastActivityTitle: null
+        };
+        map.set(key, item);
+      }
+
+      item.totalActivities += 1;
+
+      const logIso = log.timestampIso || '';
+      const formattedDate = formatDashboardDate(logIso) || formatDashboardDate(log.dateLabel);
+      const formattedTime = formatDashboardTimeHms(logIso) || log.timeLabel || null;
+
+      if (!item.lastActivityIso || logIso > item.lastActivityIso) {
+        item.lastActivityIso = logIso;
+        item.lastActivityDate = formattedDate;
+        item.lastActivityTime = formattedTime;
+        item.lastActivityTitle = log.actionTitle || null;
+      }
+
+      const isLoginEvent =
+        (log.actionCategory === 'auth' && !log.actionTitle.toLowerCase().includes('logout')) ||
+        log.actionCategory === 'registration';
+      if (isLoginEvent && (!item.lastLoginIso || logIso > item.lastLoginIso)) {
+        item.lastLoginIso = logIso;
+        item.lastLoginDate = formattedDate;
+        item.lastLoginTime = formattedTime;
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => {
+      const tsA = a.lastActivityIso || a.lastLoginIso || '';
+      const tsB = b.lastActivityIso || b.lastLoginIso || '';
+      if (tsA !== tsB) return tsB.localeCompare(tsA);
+      return a.name.localeCompare(b.name);
+    });
+  }, [usersList, activityLogs]);
+
+  const currentUserTimeSummary = useMemo(() => {
+    if (!currentUser) {
+      return {
+        loginDate: null as string | null,
+        loginTime: null as string | null,
+        lastActivityDate: null as string | null,
+        lastActivityTime: null as string | null,
+        lastActivityTitle: null as string | null
+      };
+    }
+    const matched = dashboardAccountTimeList.find(
+      item => item.username.toLowerCase() === currentUser.username.toLowerCase()
+    );
+    const effectiveLoginIso = sessionLoginAt || matched?.lastLoginIso || null;
+    return {
+      loginDate: formatDashboardDate(effectiveLoginIso) || matched?.lastLoginDate || formatDashboardDate(dashboardNow),
+      loginTime: formatDashboardTimeHms(effectiveLoginIso) || matched?.lastLoginTime || '--:--:--',
+      lastActivityDate: matched?.lastActivityDate || null,
+      lastActivityTime: matched?.lastActivityTime || null,
+      lastActivityTitle: matched?.lastActivityTitle || null
+    };
+  }, [currentUser, sessionLoginAt, dashboardAccountTimeList, dashboardNow]);
+
+  const filteredDashboardAccountTimes = useMemo(() => {
+    const q = dashAccountSearch.trim().toLowerCase();
+    return dashboardAccountTimeList.filter(acc => {
+      if (dashAccountRoleFilter !== 'all' && acc.role !== dashAccountRoleFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        acc.name.toLowerCase().includes(q) ||
+        acc.username.toLowerCase().includes(q) ||
+        (acc.schoolName || '').toLowerCase().includes(q) ||
+        (acc.lastActivityTitle || '').toLowerCase().includes(q)
+      );
+    });
+  }, [dashboardAccountTimeList, dashAccountRoleFilter, dashAccountSearch]);
+
   // Quick navigation to previous / next participant
   const handlePrevPeserta = () => {
     if (pesertaList.length === 0) return;
@@ -1987,6 +2553,13 @@ export default function App() {
       })
     );
     setCloudLastSynced(new Date());
+    const targetP = pesertaList.find(p => p.id === activePesertaId);
+    const catTitle = categories.find(c => c.key === categoryKey)?.shortTitle || categoryKey;
+    logActivity(
+      'scoring',
+      `Input Nilai ${catTitle} (Poin ${criterionNo})`,
+      `Peserta ${targetP ? `No. ${targetP.nomor} ${targetP.sekolah}` : activePesertaId}: nilai poin ${criterionNo} diubah menjadi ${val === null ? 'Kosong' : val}.`
+    );
     showToast('Nilai tersimpan & tersinkron otomatis ke Cloud');
   };
 
@@ -2016,6 +2589,11 @@ export default function App() {
           })
         );
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        logActivity(
+          'data_delete',
+          `Reset Nilai ${catName}`,
+          `Mengosongkan seluruh nilai kategori ${catName} untuk peserta No. ${activePeserta.nomor} (${activePeserta.sekolah}).`
+        );
         showToast(`Nilai ${catName} telah dikosongkan.`, 'info');
       }
     });
@@ -2161,6 +2739,11 @@ export default function App() {
     setModalScanOpen(false);
     setScanPreviewUrl(null);
     setScannedResult(null);
+    logActivity(
+      'scoring',
+      `Terapkan Hasil Scan Nilai ${activeCategory.shortTitle}`,
+      `Menerapkan ${scannedResult.scores.length} butir nilai hasil scan foto untuk peserta No. ${activePeserta?.nomor || '-'} (${activePeserta?.sekolah || '-'}).`
+    );
     showToast(`Nilai ${activeCategory.title} dari foto berhasil diterapkan!`);
   };
 
@@ -2236,7 +2819,7 @@ export default function App() {
         tanggal: pesertaFormData.tanggal,
         juri: pesertaFormData.juri.trim(),
         scores: existing?.scores || {
-          pbb: {}, variasi: {}, formasi: {}, danton: {},
+          pbb: {}, danton: {},
           devile: {}, gatur: {}, senam: {}, yelyel: {},
           beladiri: {}, speaking: {}, tenda: {}
         }
@@ -2252,6 +2835,11 @@ export default function App() {
       if (syncRes.success) {
         setCloudLastSynced(new Date());
       }
+      logActivity(
+        'data_edit',
+        'Edit Data Peserta Lomba',
+        `Memperbarui peserta No. ${updatedParticipant.nomor} (${updatedParticipant.sekolah} · ${updatedParticipant.jenjang}).`
+      );
       showToast('Data peserta berhasil diperbarui & tersinkron otomatis ke Cloud!', 'success');
     } else {
       const newId = 'p-' + Date.now();
@@ -2265,8 +2853,6 @@ export default function App() {
         juri: pesertaFormData.juri.trim(),
         scores: {
           pbb: {},
-          variasi: {},
-          formasi: {},
           danton: {},
           devile: {},
           gatur: {},
@@ -2289,6 +2875,11 @@ export default function App() {
       if (syncRes.success) {
         setCloudLastSynced(new Date());
       }
+      logActivity(
+        'registration',
+        'Tambah Peserta Lomba Baru',
+        `Menambahkan peserta No. ${newParticipant.nomor} (${newParticipant.sekolah} · ${newParticipant.jenjang}).`
+      );
       showToast(`Peserta baru "${newParticipant.peleton || newParticipant.sekolah}" berhasil ditambahkan & tersinkron otomatis ke Cloud!`, 'success');
     }
     setModalPesertaOpen(false);
@@ -2320,6 +2911,11 @@ export default function App() {
           // ignore
         }
         await deleteParticipantFromCloud(id);
+        logActivity(
+          'data_delete',
+          'Hapus Peserta Lomba',
+          `Menghapus peserta No. ${target.nomor} (${target.sekolah} · ${target.jenjang}).`
+        );
         setCloudLastSynced(new Date());
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
         showToast('Peserta berhasil dihapus dari Cloud & lokal.', 'error');
@@ -2345,6 +2941,7 @@ export default function App() {
         setPesertaList(INITIAL_PESERTA);
         setActivePesertaId(INITIAL_PESERTA[0].id);
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        logActivity('data_delete', 'Reset Semua Data Sistem', 'Mengembalikan seluruh basis data peserta dan nilai ke setelan awal.');
         showToast('Basis data telah direset ke setelan awal.', 'info');
       }
     });
@@ -2361,6 +2958,7 @@ export default function App() {
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
+    logActivity('export', 'Cadangkan Data (JSON)', `Mengunduh cadangan JSON berisi ${pesertaList.length} peserta dan ${usersList.length} akun.`);
     showToast('File cadangan JSON berhasil diunduh.');
   };
 
@@ -2379,19 +2977,25 @@ export default function App() {
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (Array.isArray(parsed.pesertaList)) {
-          setPesertaList(parsed.pesertaList);
-          parsed.pesertaList.forEach((p: Participant) => saveParticipantToCloud(p));
+          const normalizedPeserta = parsed.pesertaList.map(
+            (p: Participant) => normalizeParticipantScores(p).participant
+          );
+          setPesertaList(normalizedPeserta);
+          normalizedPeserta.forEach((p: Participant) => saveParticipantToCloud(p));
           if (Array.isArray(parsed.categories)) {
-            setCategories(parsed.categories);
-            saveConfigToCloud(parsed.categories);
+            const normalizedCats = normalizeCategoriesConfig(parsed.categories).categories;
+            setCategories(normalizedCats);
+            setTempCategoriesConfig(normalizedCats);
+            saveConfigToCloud(normalizedCats);
           }
           if (Array.isArray(parsed.usersList)) {
             setUsersList(parsed.usersList);
             parsed.usersList.forEach((u: AppUser) => saveUserToCloud(u));
           }
-          if (parsed.pesertaList.length > 0) {
-            setActivePesertaId(parsed.pesertaList[0].id);
+          if (normalizedPeserta.length > 0) {
+            setActivePesertaId(normalizedPeserta[0].id);
           }
+          logActivity('data_edit', 'Pulihkan Data (JSON)', `Memulihkan ${normalizedPeserta.length} data peserta dari file cadangan JSON.`);
           showToast('Data cadangan berhasil dipulihkan dan disinkronkan ke Cloud!');
         } else {
           showToast('Format file JSON tidak sesuai struktur aplikasi!', 'error');
@@ -2414,6 +3018,7 @@ export default function App() {
     setCategories(tempCategoriesConfig);
     saveConfigToCloud(tempCategoriesConfig);
     setModalConfigOpen(false);
+    logActivity('data_edit', 'Ubah Juknis Nilai Maksimal', 'Memperbarui konfigurasi bobot kriteria & nilai maksimal lomba.');
     showToast('Ketentuan nilai maksimal juknis berhasil diperbarui!');
   };
 
@@ -2425,6 +3030,7 @@ export default function App() {
     setTempCategoriesConfig(DEFAULT_CATEGORIES);
     setCategories(DEFAULT_CATEGORIES);
     saveConfigToCloud(DEFAULT_CATEGORIES);
+    logActivity('data_edit', 'Reset Juknis Nilai Maksimal', 'Mengembalikan konfigurasi bobot dan juknis ke standar awal.');
     showToast('Konfigurasi dikembalikan ke standar awal.');
   };
 
@@ -2862,6 +3468,7 @@ export default function App() {
     XLSX.utils.book_append_sheet(workbook, wsSlta, 'Juara Umum SLTA');
 
     XLSX.writeFile(workbook, `Rekap_Juara_Umum_SLTP_dan_SLTA_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    logActivity('export', 'Ekspor Excel Juara Umum', 'Mengunduh laporan Rekap Juara Umum SLTP & SLTA (.xlsx).');
     showToast('Laporan Juara Umum Excel (Sheet SLTP & SLTA terpisah) berhasil diunduh.');
   };
 
@@ -2911,6 +3518,7 @@ export default function App() {
     XLSX.utils.book_append_sheet(workbook, wsSlta, `${targetCat.shortTitle} SLTA`.slice(0, 30));
 
     XLSX.writeFile(workbook, `Rekap_Juara_${targetCat.shortTitle.replace(/\s+/g, '_')}_SLTP_SLTA_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    logActivity('export', `Ekspor Excel Kategori ${targetCat.shortTitle}`, `Mengunduh peringkat kategori ${targetCat.title} SLTP & SLTA (.xlsx).`);
     showToast(`Laporan Peringkat ${targetCat.title} (Sheet SLTP & SLTA) berhasil diunduh.`);
   };
 
@@ -3015,6 +3623,7 @@ export default function App() {
     });
 
     XLSX.writeFile(workbook, `Buku_Rekap_Lengkap_Lomba_PBB_PKS_SLTP_SLTA_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    logActivity('export', 'Ekspor Buku Rekap Master Excel', 'Mengunduh Buku Rekap Lengkap seluruh kategori & podium SLTP/SLTA (.xlsx).');
     showToast('Buku Rekap Master Lengkap (Multi-Sheet SLTP & SLTA Terpisah) berhasil diunduh.');
   };
 
@@ -3048,7 +3657,12 @@ export default function App() {
       ]
     ];
 
+    let lastSection = '';
     targetCat.criteria.forEach(crit => {
+      if (crit.section && crit.section !== lastSection) {
+        lastSection = crit.section;
+        rows.push(['', crit.section.toUpperCase(), '', '', '', '', '', '', '']);
+      }
       rows.push([
         crit.no,
         crit.name,
@@ -3110,7 +3724,7 @@ export default function App() {
     showToast(`Format blanko penilaian ${targetCat.title} (.xlsx) berhasil diunduh!`);
   };
 
-  // 5. Unduh Master Workbook Blanko Seluruh 11 Kriteria Mata Lomba (.xlsx)
+  // 5. Unduh Master Workbook Blanko Seluruh Kriteria Mata Lomba (.xlsx)
   const handleDownloadMasterBlankWorkbook = () => {
     const workbook = XLSX.utils.book_new();
 
@@ -3119,7 +3733,7 @@ export default function App() {
       ['MASTER FORMAT BLANKO LEMBAR PENILAIAN JURI LAPANGAN'],
       ['LOMBA BARIS-BERBARIS (PBB) & PATROLI KEAMANAN SEKOLAH (PKS) TINGKAT SLTP & SLTA'],
       [''],
-      ['Petunjuk: File ini berisi seluruh 11 lembar form blanko kriteria penilaian resmi untuk panitia & juri lapangan.'],
+      [`Petunjuk: File ini berisi seluruh ${categories.length} lembar form blanko kriteria penilaian resmi untuk panitia & juri lapangan.`],
       ['Setiap mata lomba tersedia pada sheet terpisah dan siap langsung dicetak atau diisi.'],
       [''],
       ['DAFTAR MATA LOMBA & BOBOT MAKSIMAL:'],
@@ -3164,7 +3778,12 @@ export default function App() {
         ]
       ];
 
+      let lastSection = '';
       cat.criteria.forEach(crit => {
+        if (crit.section && crit.section !== lastSection) {
+          lastSection = crit.section;
+          rows.push(['', crit.section.toUpperCase(), '', '', '', '', '', '', '']);
+        }
         rows.push([
           crit.no,
           crit.name,
@@ -3214,9 +3833,9 @@ export default function App() {
 
     XLSX.writeFile(
       workbook,
-      `Master_Format_Blanko_Semua_11_Kriteria_Lomba_PBB_PKS_${new Date().toISOString().slice(0, 10)}.xlsx`
+      `Master_Format_Blanko_Semua_${categories.length}_Kriteria_Lomba_PBB_PKS_${new Date().toISOString().slice(0, 10)}.xlsx`
     );
-    showToast('Master format blanko seluruh 11 kriteria penilaian berhasil diunduh!');
+    showToast(`Master format blanko seluruh ${categories.length} kriteria penilaian berhasil diunduh!`);
   };
 
   // 6. Unduh Daftar Nama Peserta & Sekolah Terdaftar (.xlsx)
@@ -3319,6 +3938,7 @@ export default function App() {
       workbook,
       `Daftar_Nama_Peserta_Sekolah_Lomba_PKS_${filterJenjang}_${new Date().toISOString().slice(0, 10)}.xlsx`
     );
+    logActivity('export', 'Ekspor Daftar Peserta Excel', `Mengunduh daftar ${filtered.length} peserta & sekolah (${filterJenjang.toUpperCase()}).`);
     showToast(`Daftar ${filtered.length} nama peserta & sekolah (${filterJenjang.toUpperCase()}) berhasil diunduh!`);
   };
 
@@ -3765,36 +4385,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Center: Quick Active Participant Bar */}
-            {activePeserta && (
-              <div className="hidden md:flex items-center gap-2 bg-slate-800/90 border border-slate-700/80 px-3 py-1.5 rounded-xl text-xs max-w-md truncate">
-                <span className="text-slate-400 font-semibold text-[11px] shrink-0">Peserta:</span>
-                <span className={`px-1.5 py-0.2 rounded font-black text-[10px] shrink-0 ${
-                  activePeserta.jenjang === 'SLTA' ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white'
-                }`}>
-                  {activePeserta.jenjang || 'SLTP'}
-                </span>
-                <span className="font-bold text-white truncate">
-                  No. {activePeserta.nomor} - {activePeserta.peleton ? `${activePeserta.peleton} (${activePeserta.sekolah})` : activePeserta.sekolah}
-                </span>
-                <div className="flex items-center gap-0.5 shrink-0 ml-1">
-                  <button
-                    onClick={handlePrevPeserta}
-                    title="Peserta Sebelumnya"
-                    className="p-1 hover:bg-slate-700 rounded text-slate-300 hover:text-white transition cursor-pointer"
-                  >
-                    <ChevronLeft className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={handleNextPeserta}
-                    title="Peserta Berikutnya"
-                    className="p-1 hover:bg-slate-700 rounded text-slate-300 hover:text-white transition cursor-pointer"
-                  >
-                    <ChevronRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            )}
 
             {/* Right: User Profile & Actions */}
             <div className="flex items-center space-x-2">
@@ -3977,14 +4567,14 @@ export default function App() {
                   {!sidebarCollapsed && (
                     <div className="text-left truncate">
                       <span className="block font-bold text-white text-xs">Kategori Penilaian</span>
-                      <span className="text-[10px] text-slate-400 font-normal">11 Mata Lomba</span>
+                      <span className="text-[10px] text-slate-400 font-normal">{categories.length} Mata Lomba</span>
                     </div>
                   )}
                 </div>
                 {!sidebarCollapsed && (
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="text-[10px] font-bold bg-slate-800 text-blue-300 px-1.5 py-0.5 rounded">
-                      {activeCalc?.completedCategoriesCount || 0}/11
+                    <span className="text-[10px] font-bold bg-slate-800 text-blue-300 px-1.5 py-0.5 rounded tabular-nums">
+                      {activeCalc?.completedCategoriesCount || 0}/{categories.length}
                     </span>
                     {sidebarCatDropdownOpen ? (
                       <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
@@ -4041,7 +4631,7 @@ export default function App() {
             </div>
 
             {/* ---------------------------------------------------- */}
-            {/* DROPDOWN 2: NAMA-NAMA PESERTA & SEKOLAH */}
+            {/* DROPDOWN 2: NAMA SEKOLAH & PANGKALAN KONTINGEN */}
             {/* ---------------------------------------------------- */}
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
@@ -4050,12 +4640,12 @@ export default function App() {
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <div className="p-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 shrink-0">
-                    <Users className="w-4 h-4" />
+                    <Building2 className="w-4 h-4" />
                   </div>
                   {!sidebarCollapsed && (
                     <div className="text-left truncate">
-                      <span className="block font-bold text-white text-xs">Nama-Nama Peserta</span>
-                      <span className="text-[10px] text-slate-400 font-normal">Daftar Kontingen</span>
+                      <span className="block font-bold text-white text-xs">Nama Sekolah</span>
+                      <span className="text-[10px] text-slate-400 font-normal">Daftar Pangkalan & Kontingen</span>
                     </div>
                   )}
                 </div>
@@ -4153,8 +4743,8 @@ export default function App() {
                               <span className="text-[10px] font-bold block tabular-nums text-amber-300">
                                 {summary?.totalPoints || 0} pts
                               </span>
-                              <span className="text-[9px] text-slate-400">
-                                {summary?.completedCats || 0}/11
+                              <span className="text-[9px] text-slate-400 tabular-nums">
+                                {summary?.completedCats || 0}/{categories.length}
                               </span>
                             </div>
                           </button>
@@ -4433,6 +5023,45 @@ export default function App() {
               )}
             </div>
 
+            {/* ---------------------------------------------------- */}
+            {/* MENU MANDIRI: NAMA-NAMA ANGGOTA PKS (DIREKTORI SISWA) */}
+            {/* ---------------------------------------------------- */}
+            <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
+              <button
+                onClick={() => {
+                  setCurrentTab('anggota_pks');
+                  setSidebarOpen(false);
+                  closeAllSidebarDropdowns();
+                }}
+                className={`w-full flex items-center justify-between p-2.5 text-xs font-bold transition cursor-pointer ${
+                  currentTab === 'anggota_pks'
+                    ? 'bg-emerald-600 text-white shadow-md'
+                    : 'text-slate-200 hover:bg-slate-800/60'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className={`p-1.5 rounded-lg shrink-0 ${
+                    currentTab === 'anggota_pks' ? 'bg-white/20 text-white' : 'bg-emerald-500/15 text-emerald-400'
+                  }`}>
+                    <UserCheck className="w-4 h-4" />
+                  </div>
+                  {!sidebarCollapsed && (
+                    <div className="text-left truncate">
+                      <span className="block font-bold text-white text-xs">Nama-Nama Anggota PKS</span>
+                      <span className="text-[10px] text-slate-400 font-normal">Direktori Anggota Terdaftar</span>
+                    </div>
+                  )}
+                </div>
+                {!sidebarCollapsed && (
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                    currentTab === 'anggota_pks' ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-emerald-300'
+                  }`}>
+                    {registrationsList.length}
+                  </span>
+                )}
+              </button>
+            </div>
+
             {/* Menu Alat & Master Blanko Juri */}
             <div className="pt-2 border-t border-slate-800 space-y-1">
               <button
@@ -4469,6 +5098,30 @@ export default function App() {
                     {!sidebarCollapsed && registrationsList.length > 0 && (
                       <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-blue-500/30 text-blue-200">
                         {registrationsList.length}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setPreselectedLogUsername('__ALL__');
+                      setCurrentTab('log_aktivitas');
+                      setSidebarOpen(false);
+                      closeAllSidebarDropdowns();
+                    }}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer font-bold ${
+                      currentTab === 'log_aktivitas'
+                        ? 'bg-blue-600 text-white shadow'
+                        : 'text-cyan-400 hover:text-cyan-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Activity className={`w-3.5 h-3.5 shrink-0 ${currentTab === 'log_aktivitas' ? 'text-white' : 'text-cyan-400'}`} />
+                      {!sidebarCollapsed && <span className="truncate">Log Aktivitas Pengguna</span>}
+                    </div>
+                    {!sidebarCollapsed && activityLogs.length > 0 && (
+                      <span className={`text-[10px] font-mono tabular-nums font-bold ${currentTab === 'log_aktivitas' ? 'text-blue-100' : 'text-cyan-300'}`}>
+                        {activityLogs.length}
                       </span>
                     )}
                   </button>
@@ -4643,26 +5296,6 @@ export default function App() {
           {/* Context sub-bar for Active Participant & Quick Details */}
           {activePeserta && (
             <div className="bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 py-2.5 shadow-2xs no-print flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="text-slate-400 font-bold uppercase text-[10px]">Peserta Aktif:</span>
-                <span className={`px-2 py-0.5 rounded font-black text-[11px] ${
-                  activePeserta.jenjang === 'SLTA' ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white'
-                }`}>
-                  {activePeserta.jenjang || 'SLTP'}
-                </span>
-                <span className="font-bold text-slate-900 text-sm">
-                  No. {activePeserta.nomor} - {activePeserta.peleton ? `${activePeserta.peleton} (${activePeserta.sekolah})` : activePeserta.sekolah}
-                </span>
-                {!isUserRole && (
-                  <button
-                    onClick={() => openEditPesertaModal(activePeserta)}
-                    className="ml-2 text-blue-600 hover:text-blue-800 font-bold flex items-center gap-1 hover:underline cursor-pointer"
-                  >
-                    <Edit className="w-3.5 h-3.5" /> Edit Data
-                  </button>
-                )}
-              </div>
-
               <div className="flex items-center gap-4 text-slate-500">
                 <span className="flex items-center gap-1">
                   <Calendar className="w-3.5 h-3.5 text-blue-600" /> {activePeserta.tanggal}
@@ -4735,26 +5368,48 @@ export default function App() {
                   </p>
                 </div>
 
-                <div className="bg-slate-800/80 backdrop-blur-xs border border-slate-700/80 p-4 rounded-xl text-xs space-y-2 shrink-0 md:min-w-[240px]">
-                  <div className="text-slate-400 font-semibold uppercase text-[10px] tracking-wider">
-                    Informasi Sesi Login
+                <div className="bg-slate-800/80 backdrop-blur-xs border border-slate-700/80 p-4 rounded-xl text-xs space-y-2 shrink-0 md:min-w-[270px] max-w-full">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-400 font-semibold uppercase text-[10px] tracking-wider">
+                      Informasi Sesi Login
+                    </span>
+                    <span className="font-mono tabular-nums text-[11px] font-bold text-emerald-300">
+                      {formatDashboardTimeHms(dashboardNow)}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between gap-3 text-slate-200">
                     <span className="text-slate-400">Pengguna:</span>
-                    <strong className="text-white truncate">{currentUser.username}</strong>
+                    <strong className="text-white font-mono truncate">@{currentUser.username}</strong>
                   </div>
                   <div className="flex items-center justify-between gap-3 text-slate-200">
-                    <span className="text-slate-400">Waktu:</span>
-                    <span className="font-medium text-slate-300">
-                      {new Intl.DateTimeFormat('id-ID', {
-                        day: 'numeric',
-                        month: 'short',
-                        year: 'numeric'
-                      }).format(new Date())}
+                    <span className="text-slate-400">Tanggal:</span>
+                    <span className="font-medium text-slate-200 tabular-nums">
+                      {formatDashboardDate(dashboardNow)}
                     </span>
                   </div>
+                  <div className="flex items-center justify-between gap-3 text-slate-200">
+                    <span className="text-slate-400">Login Sesi:</span>
+                    <span className="font-mono tabular-nums text-blue-200 font-semibold">
+                      {currentUserTimeSummary.loginDate} · {currentUserTimeSummary.loginTime}
+                    </span>
+                  </div>
+                  {currentUserTimeSummary.lastActivityDate && currentUserTimeSummary.lastActivityTime && (
+                    <div className="pt-1.5 border-t border-slate-700/70 space-y-0.5">
+                      <div className="flex items-center justify-between gap-3 text-slate-200">
+                        <span className="text-slate-400">Aktivitas Terakhir:</span>
+                        <span className="font-mono tabular-nums text-cyan-300 font-semibold">
+                          {currentUserTimeSummary.lastActivityDate} · {currentUserTimeSummary.lastActivityTime}
+                        </span>
+                      </div>
+                      {currentUserTimeSummary.lastActivityTitle && (
+                        <div className="text-[11px] text-slate-400 truncate text-right" title={currentUserTimeSummary.lastActivityTitle}>
+                          {currentUserTimeSummary.lastActivityTitle}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {currentUser.role === 'sekolah' && currentUser.contactWa && (
-                    <div className="flex items-center justify-between gap-3 text-slate-200">
+                    <div className="flex items-center justify-between gap-3 text-slate-200 pt-1 border-t border-slate-700/70">
                       <span className="text-slate-400">Kontak WA:</span>
                       <span className="font-mono text-emerald-400">{currentUser.contactWa}</span>
                     </div>
@@ -4852,7 +5507,7 @@ export default function App() {
                     Grafik Progres Penilaian Berdasarkan Sekolah Terdaftar
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Visualisasi sekolah yang sudah selesai (11/11 kategori), sedang berjalan, dan belum diisi nilai
+                    Visualisasi sekolah yang sudah selesai ({categories.length}/{categories.length} kategori), sedang berjalan, dan belum diisi nilai
                   </p>
                 </div>
 
@@ -5032,7 +5687,7 @@ export default function App() {
                         {dashboardProgressStats.completedCount} <span className="text-xs font-normal text-emerald-700">Sekolah</span>
                       </div>
                       <p className="text-[10px] text-emerald-600 mt-0.5">
-                        Lengkap dinilai 11 dari 11 mata lomba
+                        Lengkap dinilai {categories.length} dari {categories.length} mata lomba
                       </p>
                     </div>
 
@@ -5046,7 +5701,7 @@ export default function App() {
                         {dashboardProgressStats.inProgressCount} <span className="text-xs font-normal text-amber-700">Sekolah</span>
                       </div>
                       <p className="text-[10px] text-amber-600 mt-0.5">
-                        Sebagian kategori telah dinilai (1 - 10)
+                        Sebagian kategori telah dinilai (1 - {Math.max(1, categories.length - 1)})
                       </p>
                     </div>
 
@@ -5162,8 +5817,8 @@ export default function App() {
 
                             <td className="py-3 px-4 min-w-[180px]">
                               <div className="flex items-center justify-between text-[11px] mb-1">
-                                <span className="font-semibold text-slate-700">
-                                  {item.completedCats} / 11 Kategori
+                                <span className="font-semibold text-slate-700 tabular-nums">
+                                  {item.completedCats} / {categories.length} Kategori
                                 </span>
                                 <span className="font-mono text-slate-500">
                                   {item.pct.toFixed(0)}%
@@ -5178,7 +5833,7 @@ export default function App() {
                                       ? 'bg-amber-500'
                                       : 'bg-slate-300'
                                   }`}
-                                  style={{ width: `${(item.completedCats / 11) * 100}%` }}
+                                  style={{ width: `${(item.completedCats / (categories.length || 1)) * 100}%` }}
                                 />
                               </div>
                             </td>
@@ -5197,8 +5852,8 @@ export default function App() {
                                   <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Selesai 100%
                                 </span>
                               ) : item.completedCats > 0 ? (
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
-                                  <Clock className="w-3 h-3 text-amber-600" /> Proses ({item.completedCats}/11)
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 tabular-nums">
+                                  <Clock className="w-3 h-3 text-amber-600" /> Proses ({item.completedCats}/{categories.length})
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">
@@ -5240,6 +5895,232 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* 5. PANEL KHUSUS ADMIN: DETAIL WAKTU & TANGGAL SETIAP AKUN */}
+            {isAdminRole && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+                <div className="p-5 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-5 h-5 text-cyan-600 shrink-0" />
+                      <h3 className="text-base sm:text-lg font-bold text-slate-900">
+                        Detail Waktu & Tanggal Setiap Akun
+                      </h3>
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      <span className="font-mono tabular-nums font-semibold text-slate-700">{dashboardAccountTimeList.length}</span> akun terdaftar
+                      <span className="mx-1.5 text-slate-300">·</span>
+                      <span className="font-mono tabular-nums font-semibold text-emerald-700">
+                        {dashboardAccountTimeList.filter(a => a.totalActivities > 0).length}
+                      </span>{' '}
+                      memiliki riwayat waktu
+                      <span className="mx-1.5 text-slate-300">·</span>
+                      <span className="font-mono tabular-nums font-semibold text-slate-600">
+                        {dashboardAccountTimeList.filter(a => a.totalActivities === 0).length}
+                      </span>{' '}
+                      belum tercatat aktivitas
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPreselectedLogUsername('__ALL__');
+                      setCurrentTab('log_aktivitas');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 self-start lg:self-auto"
+                  >
+                    <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                    Log Aktivitas Lengkap
+                  </button>
+                </div>
+
+                {/* Filter & Pencarian Akun */}
+                <div className="px-5 py-3.5 bg-slate-50/80 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                  <div className="relative flex-1 max-w-md">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={dashAccountSearch}
+                      onChange={e => setDashAccountSearch(e.target.value)}
+                      placeholder="Cari nama akun, username, atau aktivitas terakhir..."
+                      className="w-full pl-9 pr-8 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-cyan-500/30 focus:border-cyan-500"
+                    />
+                    {dashAccountSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setDashAccountSearch('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        title="Hapus pencarian"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {(
+                      [
+                        { id: 'all', label: 'Semua' },
+                        { id: 'superadmin', label: 'Superadmin' },
+                        { id: 'admin', label: 'Admin' },
+                        { id: 'juri', label: 'Juri' },
+                        { id: 'sekolah', label: 'Sekolah' },
+                        { id: 'user', label: 'Tamu' }
+                      ] as const
+                    ).map(item => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setDashAccountRoleFilter(item.id)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                          dashAccountRoleFilter === item.id
+                            ? 'bg-slate-900 text-white'
+                            : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Tabel Waktu & Tanggal Per Akun */}
+                {filteredDashboardAccountTimes.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-slate-500">
+                    Tidak ada akun yang cocok dengan filter pencarian saat ini.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-200 bg-slate-50/50 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          <th className="py-3 px-4">Akun & Peran</th>
+                          <th className="py-3 px-4">Login Terakhir</th>
+                          <th className="py-3 px-4">Aktivitas Terakhir</th>
+                          <th className="py-3 px-4 text-center">Total Log</th>
+                          <th className="py-3 px-4 text-right">Aksi</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs">
+                        {filteredDashboardAccountTimes.map(acc => {
+                          const isCurrentSession =
+                            currentUser && acc.username.toLowerCase() === currentUser.username.toLowerCase();
+                          const roleLabel =
+                            acc.role === 'superadmin'
+                              ? 'Superadmin'
+                              : acc.role === 'admin'
+                              ? 'Admin Panitia'
+                              : acc.role === 'juri'
+                              ? 'Juri Lapangan'
+                              : acc.role === 'sekolah'
+                              ? 'Perwakilan Sekolah'
+                              : 'Tamu';
+
+                          return (
+                            <tr
+                              key={acc.username.toLowerCase()}
+                              className={`hover:bg-slate-50/80 transition ${
+                                isCurrentSession ? 'bg-cyan-50/30' : ''
+                              }`}
+                            >
+                              <td className="py-3 px-4 align-top">
+                                <div className="font-semibold text-slate-900 flex items-center gap-2">
+                                  <span>{acc.name}</span>
+                                  {isCurrentSession && (
+                                    <span className="text-[10px] font-semibold text-emerald-700">
+                                      · Sesi Aktif
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-500 mt-0.5">
+                                  <span className="font-mono text-slate-700">@{acc.username}</span>
+                                  <span className="mx-1.5 text-slate-300">·</span>
+                                  <span>{roleLabel}</span>
+                                  {!acc.isRegisteredUser && (
+                                    <>
+                                      <span className="mx-1.5 text-slate-300">·</span>
+                                      <span className="text-amber-600">Riwayat Log</span>
+                                    </>
+                                  )}
+                                </div>
+                              </td>
+
+                              <td className="py-3 px-4 align-top whitespace-nowrap">
+                                {acc.lastLoginDate && acc.lastLoginTime ? (
+                                  <div className="space-y-0.5">
+                                    <div className="font-medium text-slate-800 flex items-center gap-1.5">
+                                      <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                      <span>{acc.lastLoginDate}</span>
+                                    </div>
+                                    <div className="font-mono tabular-nums text-[11px] text-blue-700 font-semibold pl-5">
+                                      {acc.lastLoginTime}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <span className="text-[11px] text-slate-400 italic">
+                                    Belum ada login tercatat
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="py-3 px-4 align-top">
+                                {acc.lastActivityDate && acc.lastActivityTime ? (
+                                  <div className="space-y-0.5 min-w-[180px]">
+                                    <div className="flex items-center gap-1.5 whitespace-nowrap">
+                                      <span className="font-medium text-slate-800">
+                                        {acc.lastActivityDate}
+                                      </span>
+                                      <span className="text-slate-300">·</span>
+                                      <span className="font-mono tabular-nums text-emerald-700 font-semibold">
+                                        {acc.lastActivityTime}
+                                      </span>
+                                    </div>
+                                    {acc.lastActivityTitle && (
+                                      <div
+                                        className="text-[11px] text-slate-500 truncate max-w-[260px]"
+                                        title={acc.lastActivityTitle}
+                                      >
+                                        {acc.lastActivityTitle}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-[11px] text-slate-400 italic">
+                                    Belum ada aktivitas
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="py-3 px-4 align-top text-center">
+                                <span className="font-mono tabular-nums font-bold text-slate-800">
+                                  {acc.totalActivities}
+                                </span>
+                              </td>
+
+                              <td className="py-3 px-4 align-top text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setPreselectedLogUsername(acc.username);
+                                    setCurrentTab('log_aktivitas');
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-cyan-50 hover:bg-cyan-100 text-cyan-800 font-semibold rounded-lg text-[11px] transition cursor-pointer whitespace-nowrap shrink-0"
+                                  title={`Lihat seluruh log tanggal, jam & GPS milik @${acc.username}`}
+                                >
+                                  Detail Log
+                                  <ChevronRight className="w-3 h-3" />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -5265,7 +6146,9 @@ export default function App() {
                     {activeCategory.title}
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    {activeCategory.criteria.length} Butir Kriteria • Pilihan Nilai: KS (Kurang Sekali), K (Kurang), C (Cukup), B (Baik), A (Sangat Baik / Maksimal).
+                    {activeCategory.key === 'pbb'
+                      ? `${activeCategory.criteria.length} Butir Kriteria (A. Gerakan Dasar PBB 500 pt • B. Gerakan Variasi 84 pt • C. Gerakan Formasi 114 pt) • Pilihan Nilai: KS, K, C, B, A.`
+                      : `${activeCategory.criteria.length} Butir Kriteria • Pilihan Nilai: KS (Kurang Sekali), K (Kurang), C (Cukup), B (Baik), A (Sangat Baik / Maksimal).`}
                   </p>
                 </div>
 
@@ -5438,86 +6321,122 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 font-medium">
-                    {activeCategory.criteria
-                      .filter(c => {
+                    {(() => {
+                      const filteredCriteria = activeCategory.criteria.filter(c => {
                         const score = activePeserta?.scores?.[activeCategory.key]?.[c.no];
                         if (criteriaFilter === 'unscored') return score === undefined || score === null;
                         if (criteriaFilter === 'scored') return score !== undefined && score !== null;
                         return true;
-                      })
-                      .map(c => {
+                      });
+
+                      const sectionTotals: Record<string, { obtained: number; max: number }> = {};
+                      activeCategory.criteria.forEach(item => {
+                        if (!item.section) return;
+                        if (!sectionTotals[item.section]) {
+                          sectionTotals[item.section] = { obtained: 0, max: 0 };
+                        }
+                        const sc = activePeserta?.scores?.[activeCategory.key]?.[item.no];
+                        if (sc !== undefined && sc !== null) {
+                          sectionTotals[item.section].obtained += Number(sc);
+                        }
+                        sectionTotals[item.section].max += Number(item.weights[4] || 0);
+                      });
+
+                      return filteredCriteria.map((c, idx) => {
+                        const prevSection = idx > 0 ? filteredCriteria[idx - 1].section : null;
+                        const showSectionHeader = Boolean(c.section && c.section !== prevSection);
+                        const secStats = c.section ? sectionTotals[c.section] : null;
                         const selectedVal = activePeserta?.scores?.[activeCategory.key]?.[c.no];
                         const isScored = selectedVal !== undefined && selectedVal !== null;
 
                         return (
-                          <tr key={c.no} className="hover:bg-blue-50/40 transition">
-                            <td className="py-2.5 px-3 text-center text-slate-400 font-bold">{c.no}</td>
-                            <td className="py-2.5 px-4 font-semibold text-slate-800">
-                              <span>{c.name}</span>
-                              {!isScored && (
-                                <span className="text-[10px] text-amber-600 font-bold block sm:hidden">
-                                  Belum dinilai
-                                </span>
-                              )}
-                            </td>
-
-                            <td className="py-2.5 px-3 text-center bg-slate-50/70">
-                              <select
-                                disabled={isUserRole}
-                                value={isScored ? String(selectedVal) : ''}
-                                onChange={e => {
-                                  const val = e.target.value === '' ? null : Number(e.target.value);
-                                  handleScoreSelect(activeCategory.key, c.no, val);
-                                }}
-                                className={`w-full py-1.5 px-2 rounded-lg text-xs font-bold border transition outline-none cursor-pointer ${
-                                  isScored
-                                    ? 'bg-blue-50 text-blue-800 border-blue-400'
-                                    : 'bg-white text-slate-500 border-slate-300'
-                                }`}
-                              >
-                                <option value="">-- Pilih Nilai --</option>
-                                <option value={c.weights[0]}>KS - Kurang Sekali ({c.weights[0]} pt)</option>
-                                <option value={c.weights[1]}>K - Kurang ({c.weights[1]} pt)</option>
-                                <option value={c.weights[2]}>C - Cukup ({c.weights[2]} pt)</option>
-                                <option value={c.weights[3]}>B - Baik ({c.weights[3]} pt)</option>
-                                <option value={c.weights[4]}>A - Sangat Baik / Maksimal ({c.weights[4]} pt)</option>
-                              </select>
-                            </td>
-
-                            {c.weights.map((val, idx) => {
-                              const isChecked = selectedVal === val;
-                              return (
-                                <td key={idx} className="py-2.5 px-1.5 text-center">
-                                  <label className={`block ${isUserRole ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}>
-                                    <input
-                                      type="radio"
-                                      name={`${activeCategory.key}_${c.no}`}
-                                      value={val}
-                                      disabled={isUserRole}
-                                      checked={isChecked}
-                                      onChange={() => handleScoreSelect(activeCategory.key, c.no, val)}
-                                      className="hidden"
-                                    />
-                                    <span
-                                      className={`inline-flex items-center justify-center w-8 h-8 rounded-lg text-xs font-bold border transition ${
-                                        isChecked
-                                          ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                                          : 'border-slate-200 hover:border-blue-400 text-slate-700'
-                                      }`}
-                                    >
-                                      {val}
+                          <React.Fragment key={c.no}>
+                            {showSectionHeader && (
+                              <tr className="bg-slate-100/90 border-y border-slate-200">
+                                <td colSpan={9} className="py-2.5 px-4">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <span className="text-xs font-extrabold uppercase tracking-wider text-slate-800">
+                                      {c.section}
                                     </span>
-                                  </label>
+                                    {secStats && (
+                                      <span className="text-xs font-bold text-blue-700 tabular-nums">
+                                        Subtotal Bagian: {secStats.obtained} / {secStats.max} pt
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
-                              );
-                            })}
+                              </tr>
+                            )}
+                            <tr className="hover:bg-blue-50/40 transition">
+                              <td className="py-2.5 px-3 text-center text-slate-400 font-bold tabular-nums">{c.no}</td>
+                              <td className="py-2.5 px-4 font-semibold text-slate-800">
+                                <span>{c.name}</span>
+                                {!isScored && (
+                                  <span className="text-[10px] text-amber-600 font-bold block sm:hidden">
+                                    Belum dinilai
+                                  </span>
+                                )}
+                              </td>
 
-                            <td className="py-2.5 px-4 text-center font-black text-blue-700 bg-slate-50 text-base tabular-nums">
-                              {isScored ? selectedVal : '-'}
-                            </td>
-                          </tr>
+                              <td className="py-2.5 px-3 text-center bg-slate-50/70">
+                                <select
+                                  disabled={isUserRole}
+                                  value={isScored ? String(selectedVal) : ''}
+                                  onChange={e => {
+                                    const val = e.target.value === '' ? null : Number(e.target.value);
+                                    handleScoreSelect(activeCategory.key, c.no, val);
+                                  }}
+                                  className={`w-full py-1.5 px-2 rounded-lg text-xs font-bold border transition outline-none cursor-pointer ${
+                                    isScored
+                                      ? 'bg-blue-50 text-blue-800 border-blue-400'
+                                      : 'bg-white text-slate-500 border-slate-300'
+                                  }`}
+                                >
+                                  <option value="">-- Pilih Nilai --</option>
+                                  <option value={c.weights[0]}>KS - Kurang Sekali ({c.weights[0]} pt)</option>
+                                  <option value={c.weights[1]}>K - Kurang ({c.weights[1]} pt)</option>
+                                  <option value={c.weights[2]}>C - Cukup ({c.weights[2]} pt)</option>
+                                  <option value={c.weights[3]}>B - Baik ({c.weights[3]} pt)</option>
+                                  <option value={c.weights[4]}>A - Sangat Baik / Maksimal ({c.weights[4]} pt)</option>
+                                </select>
+                              </td>
+
+                              {c.weights.map((val, wIdx) => {
+                                const isChecked = selectedVal === val;
+                                return (
+                                  <td key={wIdx} className="py-2.5 px-1.5 text-center">
+                                    <label className={`block ${isUserRole ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}>
+                                      <input
+                                        type="radio"
+                                        name={`${activeCategory.key}_${c.no}`}
+                                        value={val}
+                                        disabled={isUserRole}
+                                        checked={isChecked}
+                                        onChange={() => handleScoreSelect(activeCategory.key, c.no, val)}
+                                        className="hidden"
+                                      />
+                                      <span
+                                        className={`inline-flex items-center justify-center w-8 h-8 rounded-lg text-xs font-bold border transition tabular-nums ${
+                                          isChecked
+                                            ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                            : 'border-slate-200 hover:border-blue-400 text-slate-700'
+                                        }`}
+                                      >
+                                        {val}
+                                      </span>
+                                    </label>
+                                  </td>
+                                );
+                              })}
+
+                              <td className="py-2.5 px-4 text-center font-black text-blue-700 bg-slate-50 text-base tabular-nums">
+                                {isScored ? selectedVal : '-'}
+                              </td>
+                            </tr>
+                          </React.Fragment>
                         );
-                      })}
+                      });
+                    })()}
                   </tbody>
                   <tfoot className="bg-slate-100 font-bold border-t-2 border-slate-300">
                     <tr>
@@ -7143,6 +8062,7 @@ export default function App() {
             handleExportFormBalok2Excel={handleExportFormBalok2Excel}
             blankoConfig={blankoConfig}
             onOpenBlankoEditor={() => setModalBlankoEditorOpen(true)}
+            onLogActivity={(cat, title, details) => logActivity(cat, title, details)}
             showToast={showToast}
           />
         )}
@@ -7157,6 +8077,60 @@ export default function App() {
             currentUser={currentUser}
             showToast={showToast}
             onOpenPaymentSettings={() => setModalPaymentSettingsOpen(true)}
+            onLogActivity={(cat, title, details) => logActivity(cat, title, details)}
+          />
+        )}
+
+        {/* ==================================================== */}
+        {/* MENU MANDIRI: NAMA-NAMA ANGGOTA PKS TERDAFTAR        */}
+        {/* ==================================================== */}
+        {currentTab === 'anggota_pks' && (
+          <MembersDirectoryView
+            submissionsList={registrationsList}
+            currentUser={currentUser}
+            paymentConfig={paymentConfig}
+            onNavigateToForm={(targetTab) => setCurrentTab(targetTab)}
+            onLogActivity={(cat, title, details) => logActivity(cat, title, details)}
+            showToast={showToast}
+          />
+        )}
+
+        {/* ==================================================== */}
+        {/* TAB ADMIN: LOG AKTIVITAS PER AKUN (GPS & WAKTU)      */}
+        {/* ==================================================== */}
+        {currentTab === 'log_aktivitas' && isAdminRole && (
+          <ActivityLogsAdminView
+            logs={activityLogs}
+            setLogs={setActivityLogs}
+            usersList={usersList}
+            currentUser={currentUser}
+            isSuperAdmin={isSuperAdmin}
+            initialSelectedUsername={preselectedLogUsername}
+            onRefreshLocation={async () => {
+              await recordUserActivity({
+                user: currentUser
+                  ? {
+                      username: currentUser.username,
+                      name: currentUser.name,
+                      role: currentUser.role
+                    }
+                  : null,
+                actionCategory: 'system',
+                actionTitle: 'Pembaruan Koordinat GPS Manual',
+                details: 'Admin memperbarui koordinat lokasi perangkat saat memantau Log Aktivitas.',
+                tabContext: 'Log Aktivitas Pengguna',
+                forceRefreshLocation: true,
+                onRecorded: newEntry => {
+                  setActivityLogs(prev => {
+                    const next = [newEntry, ...prev.filter(item => item.id !== newEntry.id)];
+                    persistCachedActivityLogs(next);
+                    return next;
+                  });
+                }
+              });
+            }}
+            onLogExport={(title, details) => logActivity('export', title, details)}
+            showToast={showToast}
           />
         )}
       </main>
@@ -7173,7 +8147,7 @@ export default function App() {
       {/* ==================================================== */}
       {modalUserOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
             <div className="bg-slate-900 text-white px-5 py-4 flex justify-between items-center shrink-0">
               <div>
                 <h3 className="font-bold text-base flex items-center gap-2">
@@ -7557,189 +8531,287 @@ export default function App() {
             )}
 
             {/* TAB 3: DAFTAR PENGGUNA TERDAFTAR */}
-            {userFormTab === 'list' && (
-              <div className="p-5 overflow-y-auto flex-1 space-y-4">
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-600 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div>
-                    <span className="font-bold text-slate-800">Hierarki Hak Akses:</span>
-                    <span className="ml-1 text-slate-600">
-                      <strong>Super Admin</strong> (semua kontrol & darurat), <strong>Admin Panitia</strong> (peserta, nilai & sekolah), <strong>Juri</strong> (input nilai), <strong>Sekolah</strong> (biodata peserta & form).
-                    </span>
+            {userFormTab === 'list' && (() => {
+              const adminCount = usersList.filter(u => u.role === 'superadmin' || u.role === 'admin' || u.username === 'admin' || u.username === 'administrator').length;
+              const juriCount = usersList.filter(u => u.role === 'juri' && u.username !== 'admin' && u.username !== 'administrator').length;
+              const sekolahCount = usersList.filter(u => u.role === 'sekolah').length;
+              const tamuCount = usersList.filter(u => u.role === 'user').length;
+
+              const filteredUsers = usersList.filter(u => {
+                const isUserSA = u.role === 'superadmin' || u.username === 'admin' || u.username === 'administrator';
+                const effectiveCat = isUserSA || u.role === 'admin' ? 'admin' : u.role;
+                const matchCat = userCategoryTab === 'all' || effectiveCat === userCategoryTab;
+                const q = userSearchQuery.trim().toLowerCase();
+                const matchSearch = !q ||
+                  u.username.toLowerCase().includes(q) ||
+                  u.name.toLowerCase().includes(q) ||
+                  (u.schoolName && u.schoolName.toLowerCase().includes(q));
+                return matchCat && matchSearch;
+              });
+
+              const categoryTabs = [
+                { id: 'all' as const, label: 'Semua Akun', count: usersList.length, activeCls: 'bg-slate-900 text-white border-slate-900' },
+                { id: 'admin' as const, label: 'Admin & Super Admin', count: adminCount, activeCls: 'bg-blue-600 text-white border-blue-600' },
+                { id: 'juri' as const, label: 'Juri Lapangan', count: juriCount, activeCls: 'bg-amber-600 text-white border-amber-600' },
+                { id: 'sekolah' as const, label: 'Sekolah', count: sekolahCount, activeCls: 'bg-emerald-600 text-white border-emerald-600' },
+                { id: 'user' as const, label: 'Tamu / User', count: tamuCount, activeCls: 'bg-slate-700 text-white border-slate-700' },
+              ];
+
+              return (
+                <div className="p-5 overflow-y-auto flex-1 space-y-4">
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-600 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <span className="font-bold text-slate-800">Hierarki Hak Akses:</span>
+                      <span className="ml-1 text-slate-600">
+                        <strong>Super Admin</strong> (kontrol penuh), <strong>Admin Panitia</strong> (peserta, nilai & sekolah), <strong>Juri</strong> (input nilai), <strong>Sekolah</strong> (biodata & form).
+                      </span>
+                    </div>
+                    <span className="font-semibold text-slate-700 shrink-0">Total {usersList.length} Akun</span>
                   </div>
-                  <span className="font-semibold text-slate-700 shrink-0">Total {usersList.length} Pengguna</span>
-                </div>
 
-                <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-100 font-bold uppercase text-slate-600 border-b border-slate-200">
-                      <tr>
-                        <th className="p-3">Username</th>
-                        <th className="p-3">Password</th>
-                        <th className="p-3">Nama Lengkap</th>
-                        <th className="p-3 text-center">Peran Akses</th>
-                        <th className="p-3 text-center">Aksi</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200 font-medium">
-                      {usersList.map(u => {
-                        const isUserSuperAdmin = u.role === 'superadmin' || u.username === 'admin' || u.username === 'administrator';
+                  {/* Tab Pemisah Kategori Akun & Pencarian */}
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap gap-1.5">
+                      {categoryTabs.map(tab => {
+                        const isActive = userCategoryTab === tab.id;
                         return (
-                          <tr key={u.username} className="hover:bg-slate-50 transition">
-                            <td className="p-3 font-bold text-slate-900">
-                              <div className="flex items-center gap-1.5">
-                                <span>{u.username}</span>
-                                {currentUser?.username === u.username && (
-                                  <span className="text-[9px] bg-blue-100 text-blue-800 font-extrabold px-1.5 py-0.2 rounded">
-                                    Anda
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="p-3">
-                              {canViewPasswords ? (
-                                (!isSuperAdmin && isUserSuperAdmin) ? (
-                                  <span
-                                    className="inline-flex items-center gap-1 font-mono bg-purple-50 text-purple-900 border border-purple-200 px-2 py-0.5 rounded text-[11px] font-bold"
-                                    title="Password Administrator Utama dilindungi dan hanya dapat dilihat oleh Super Admin"
-                                  >
-                                    <Lock className="w-3 h-3 text-purple-600" />
-                                    <span>••••••••</span>
-                                  </span>
-                                ) : (
-                                  <div className="flex items-center gap-1 font-mono">
-                                    <span
-                                      className={`px-2 py-0.5 rounded text-[11px] font-bold border transition ${
-                                        showUserPasswords[u.username]
-                                          ? 'bg-amber-50 text-amber-950 border-amber-300'
-                                          : 'bg-slate-100 text-slate-700 border-slate-200'
-                                      }`}
-                                    >
-                                      {showUserPasswords[u.username] ? (u.password || '-') : '••••••••'}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setShowUserPasswords(prev => ({
-                                          ...prev,
-                                          [u.username]: !prev[u.username]
-                                        }));
-                                      }}
-                                      title={showUserPasswords[u.username] ? "Sembunyikan Password" : "Lihat Password"}
-                                      className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer transition"
-                                    >
-                                      {showUserPasswords[u.username] ? (
-                                        <EyeOff className="w-3.5 h-3.5 text-amber-700" />
-                                      ) : (
-                                        <Eye className="w-3.5 h-3.5" />
-                                      )}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (navigator.clipboard && u.password) {
-                                          navigator.clipboard.writeText(u.password);
-                                          showToast(`Password akun @${u.username} disalin ke clipboard!`, 'info');
-                                        }
-                                      }}
-                                      title="Salin Password"
-                                      className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer transition"
-                                    >
-                                      <Copy className="w-3.5 h-3.5" />
-                                    </button>
-                                  </div>
-                                )
-                              ) : (
-                                <span
-                                  className="inline-flex items-center gap-1 font-mono bg-slate-100 text-slate-400 border border-slate-200 px-2 py-0.5 rounded text-[11px] font-medium"
-                                  title="Hanya akun Admin dan Super Admin yang berhak melihat password"
-                                >
-                                  <Lock className="w-3 h-3 text-slate-400" />
-                                  <span>••••••••</span>
-                                </span>
-                              )}
-                            </td>
-                            <td className="p-3 text-slate-700">{u.name}</td>
-                            <td className="p-3 text-center">
-                              {isUserSuperAdmin ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-purple-100 text-purple-900 border border-purple-300">
-                                  SUPER ADMIN
-                                </span>
-                              ) : u.role === 'admin' ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-blue-100 text-blue-900 border border-blue-300">
-                                  ADMIN TERBATAS
-                                </span>
-                              ) : u.role === 'juri' ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-100 text-amber-900 border border-amber-300">
-                                  JURI LAPANGAN
-                                </span>
-                              ) : u.role === 'sekolah' ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-100 text-emerald-900 border border-emerald-300">
-                                  SEKOLAH
-                                </span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-slate-100 text-slate-800 border border-slate-300">
-                                  TAMU
-                                </span>
-                              )}
-                            </td>
-                            <td className="p-3 text-center">
-                              <div className="flex items-center justify-center gap-1">
-                                {/* Tombol Edit User & Password */}
-                                {!isSuperAdmin && isUserSuperAdmin ? (
-                                  <span className="text-[10px] text-slate-400 italic px-1 font-semibold flex items-center gap-0.5">
-                                    <Lock className="w-3 h-3 text-slate-400" /> Terkunci
-                                  </span>
-                                ) : (
-                                  <button
-                                    onClick={() => handleStartEditUser(u)}
-                                    title="Edit Data Pengguna & Ubah Password"
-                                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg cursor-pointer transition"
-                                  >
-                                    <Edit className="w-4 h-4" />
-                                  </button>
-                                )}
-
-                                {/* Tombol Hapus User */}
-                                {!isUserSuperAdmin && currentUser?.username !== u.username ? (
-                                  (!isSuperAdmin && u.role === 'admin') ? null : (
-                                    <button
-                                      onClick={() => handleDeleteUser(u.username)}
-                                      title="Hapus Akun Pengguna"
-                                      className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer transition"
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
-                                  )
-                                ) : isUserSuperAdmin && currentUser?.username !== u.username ? (
-                                  <span className="text-[10px] text-slate-400 italic px-1">Kunci</span>
-                                ) : null}
-                              </div>
-                            </td>
-                          </tr>
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => setUserCategoryTab(tab.id)}
+                            className={`px-3 py-1.5 rounded-xl text-[11px] font-bold border transition flex items-center gap-1.5 cursor-pointer ${
+                              isActive
+                                ? `${tab.activeCls} shadow-xs`
+                                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
+                            }`}
+                          >
+                            <span>{tab.label}</span>
+                            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${
+                              isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'
+                            }`}>
+                              {tab.count}
+                            </span>
+                          </button>
                         );
                       })}
-                    </tbody>
-                  </table>
-                </div>
+                    </div>
 
-                <div className="pt-2 flex justify-between items-center">
-                  <p className="text-[11px] text-slate-500">
-                    Klik ikon <Edit className="w-3.5 h-3.5 inline text-blue-600" /> pada baris akun untuk mengedit identitas atau mereset password.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingUserOriginalUsername(null);
-                      setUserFormData({ username: '', password: '', name: '', role: 'juri' });
-                      setUserFormTab('add');
-                    }}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5"
-                  >
-                    <UserPlus className="w-4 h-4" /> Tambah User Baru
-                  </button>
+                    <div className="relative">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={userSearchQuery}
+                        onChange={e => setUserSearchQuery(e.target.value)}
+                        placeholder="Cari username, nama lengkap, atau nama sekolah..."
+                        className="w-full pl-9 pr-8 py-2 text-xs border border-slate-200 rounded-xl bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none transition"
+                      />
+                      {userSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setUserSearchQuery('')}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="border border-slate-200 rounded-xl overflow-x-auto shadow-2xs">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-100 font-bold uppercase text-slate-600 border-b border-slate-200">
+                        <tr>
+                          <th className="p-3">Username</th>
+                          <th className="p-3">Password</th>
+                          <th className="p-3">Nama Lengkap / Sekolah</th>
+                          <th className="p-3 text-center">Kategori Peran</th>
+                          <th className="p-3 text-center">Aksi</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200 font-medium">
+                        {filteredUsers.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="p-8 text-center text-slate-400">
+                              <Users className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                              <p className="font-bold text-slate-500">Tidak ada akun ditemukan</p>
+                              <p className="text-[11px] mt-0.5">Coba ubah tab kategori peran atau kata kunci pencarian.</p>
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredUsers.map(u => {
+                            const isUserSuperAdmin = u.role === 'superadmin' || u.username === 'admin' || u.username === 'administrator';
+                            return (
+                              <tr key={u.username} className="hover:bg-slate-50 transition">
+                                <td className="p-3 font-bold text-slate-900">
+                                  <div className="flex items-center gap-1.5">
+                                    <span>{u.username}</span>
+                                    {currentUser?.username === u.username && (
+                                      <span className="text-[9px] bg-blue-100 text-blue-800 font-extrabold px-1.5 py-0.2 rounded">
+                                        Anda
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="p-3">
+                                  {canViewPasswords ? (
+                                    (!isSuperAdmin && isUserSuperAdmin) ? (
+                                      <span
+                                        className="inline-flex items-center gap-1 font-mono bg-purple-50 text-purple-900 border border-purple-200 px-2 py-0.5 rounded text-[11px] font-bold"
+                                        title="Password Administrator Utama dilindungi dan hanya dapat dilihat oleh Super Admin"
+                                      >
+                                        <Lock className="w-3 h-3 text-purple-600" />
+                                        <span>••••••••</span>
+                                      </span>
+                                    ) : (
+                                      <div className="flex items-center gap-1 font-mono">
+                                        <span
+                                          className={`px-2 py-0.5 rounded text-[11px] font-bold border transition ${
+                                            showUserPasswords[u.username]
+                                              ? 'bg-amber-50 text-amber-950 border-amber-300'
+                                              : 'bg-slate-100 text-slate-700 border-slate-200'
+                                          }`}
+                                        >
+                                          {showUserPasswords[u.username] ? (u.password || '-') : '••••••••'}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setShowUserPasswords(prev => ({
+                                              ...prev,
+                                              [u.username]: !prev[u.username]
+                                            }));
+                                          }}
+                                          title={showUserPasswords[u.username] ? "Sembunyikan Password" : "Lihat Password"}
+                                          className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer transition"
+                                        >
+                                          {showUserPasswords[u.username] ? (
+                                            <EyeOff className="w-3.5 h-3.5 text-amber-700" />
+                                          ) : (
+                                            <Eye className="w-3.5 h-3.5" />
+                                          )}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (navigator.clipboard && u.password) {
+                                              navigator.clipboard.writeText(u.password);
+                                              showToast(`Password akun @${u.username} disalin ke clipboard!`, 'info');
+                                            }
+                                          }}
+                                          title="Salin Password"
+                                          className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer transition"
+                                        >
+                                          <Copy className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    )
+                                  ) : (
+                                    <span
+                                      className="inline-flex items-center gap-1 font-mono bg-slate-100 text-slate-400 border border-slate-200 px-2 py-0.5 rounded text-[11px] font-medium"
+                                      title="Hanya akun Admin dan Super Admin yang berhak melihat password"
+                                    >
+                                      <Lock className="w-3 h-3 text-slate-400" />
+                                      <span>••••••••</span>
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3 text-slate-700">
+                                  <div className="font-semibold text-slate-800">{u.name}</div>
+                                  {u.role === 'sekolah' && u.schoolName && (
+                                    <div className="text-[10px] text-emerald-700 font-medium flex items-center gap-1 mt-0.5">
+                                      <Building2 className="w-3 h-3 shrink-0" />
+                                      <span>{u.schoolName} {u.schoolLevel ? `(${u.schoolLevel})` : ''}</span>
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="p-3 text-center">
+                                  {isUserSuperAdmin ? (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-purple-100 text-purple-900 border border-purple-300">
+                                      SUPER ADMIN
+                                    </span>
+                                  ) : u.role === 'admin' ? (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-blue-100 text-blue-900 border border-blue-300">
+                                      ADMIN TERBATAS
+                                    </span>
+                                  ) : u.role === 'juri' ? (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-100 text-amber-900 border border-amber-300">
+                                      JURI LAPANGAN
+                                    </span>
+                                  ) : u.role === 'sekolah' ? (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-100 text-emerald-900 border border-emerald-300">
+                                      SEKOLAH
+                                    </span>
+                                  ) : (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-slate-100 text-slate-800 border border-slate-300">
+                                      TAMU
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3 text-center">
+                                  <div className="flex items-center justify-center gap-1">
+                                    {/* Tombol Edit User & Password */}
+                                    {!isSuperAdmin && isUserSuperAdmin ? (
+                                      <span className="text-[10px] text-slate-400 italic px-1 font-semibold flex items-center gap-0.5">
+                                        <Lock className="w-3 h-3 text-slate-400" /> Terkunci
+                                      </span>
+                                    ) : (
+                                      <button
+                                        onClick={() => handleStartEditUser(u)}
+                                        title="Edit Data Pengguna & Ubah Password"
+                                        className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg cursor-pointer transition"
+                                      >
+                                        <Edit className="w-4 h-4" />
+                                      </button>
+                                    )}
+
+                                    {/* Tombol Hapus User */}
+                                    {!isUserSuperAdmin && currentUser?.username !== u.username ? (
+                                      (!isSuperAdmin && u.role === 'admin') ? null : (
+                                        <button
+                                          onClick={() => handleDeleteUser(u.username)}
+                                          title="Hapus Akun Pengguna"
+                                          className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer transition"
+                                        >
+                                          <Trash2 className="w-4 h-4" />
+                                        </button>
+                                      )
+                                    ) : isUserSuperAdmin && currentUser?.username !== u.username ? (
+                                      <span className="text-[10px] text-slate-400 italic px-1">Kunci</span>
+                                    ) : null}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="pt-2 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                    <p className="text-[11px] text-slate-500">
+                      Menampilkan <strong>{filteredUsers.length}</strong> dari <strong>{usersList.length}</strong> akun. Klik <Edit className="w-3.5 h-3.5 inline text-blue-600" /> untuk mengedit atau mereset password.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingUserOriginalUsername(null);
+                        setUserFormData({
+                          username: '',
+                          password: '',
+                          name: '',
+                          role: userCategoryTab === 'all' ? 'juri' : userCategoryTab
+                        });
+                        setUserFormTab('add');
+                      }}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5 shrink-0"
+                    >
+                      <UserPlus className="w-4 h-4" /> Tambah User Baru
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}
@@ -8175,14 +9247,14 @@ export default function App() {
                     <span>Download Excel</span>
                   </button>
 
-                  {/* Unduh Master Workbook 11 Kategori */}
+                  {/* Unduh Master Workbook Semua Kategori */}
                   <button
                     onClick={handleDownloadMasterBlankWorkbook}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow cursor-pointer transition hidden md:flex"
-                    title="Unduh seluruh 11 kriteria dalam satu file Excel multi-sheet"
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow cursor-pointer transition hidden md:flex whitespace-nowrap shrink-0"
+                    title={`Unduh seluruh ${categories.length} kriteria dalam satu file Excel multi-sheet`}
                   >
                     <Layers className="w-3.5 h-3.5" />
-                    <span>Master 11 Kategori</span>
+                    <span>Master {categories.length} Kategori</span>
                   </button>
 
                   {/* Cetak Fisik / PDF */}
@@ -8300,37 +9372,50 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-300">
-                    {targetBlankCat.criteria.map(crit => (
-                      <tr key={crit.no} className="hover:bg-slate-50/50">
-                        <td className="p-2 text-center font-bold text-slate-600 border-r border-slate-300">
-                          {crit.no}
-                        </td>
-                        <td className="p-2 font-semibold text-slate-900 border-r border-slate-300">
-                          {crit.name}
-                        </td>
-                        <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700">
-                          {crit.weights[0]}
-                        </td>
-                        <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700">
-                          {crit.weights[1]}
-                        </td>
-                        <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700">
-                          {crit.weights[2]}
-                        </td>
-                        <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700">
-                          {crit.weights[3]}
-                        </td>
-                        <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700 font-bold">
-                          {crit.weights[4]}
-                        </td>
-                        <td className="p-2 text-center border-r border-slate-300 bg-slate-50/30">
-                          <div className="w-10 h-6 border border-slate-300 rounded mx-auto" />
-                        </td>
-                        <td className="p-2">
-                          <div className="border-b border-dotted border-slate-400 h-5" />
-                        </td>
-                      </tr>
-                    ))}
+                    {targetBlankCat.criteria.map((crit, idx) => {
+                      const prevSection = idx > 0 ? targetBlankCat.criteria[idx - 1].section : null;
+                      const showSectionHeader = Boolean(crit.section && crit.section !== prevSection);
+                      return (
+                        <React.Fragment key={crit.no}>
+                          {showSectionHeader && (
+                            <tr className="bg-slate-100 font-bold border-y border-slate-400">
+                              <td colSpan={9} className="p-2 text-[11px] uppercase tracking-wider text-slate-800">
+                                {crit.section}
+                              </td>
+                            </tr>
+                          )}
+                          <tr className="hover:bg-slate-50/50">
+                            <td className="p-2 text-center font-bold text-slate-600 border-r border-slate-300 tabular-nums">
+                              {crit.no}
+                            </td>
+                            <td className="p-2 font-semibold text-slate-900 border-r border-slate-300">
+                              {crit.name}
+                            </td>
+                            <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700 tabular-nums">
+                              {crit.weights[0]}
+                            </td>
+                            <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700 tabular-nums">
+                              {crit.weights[1]}
+                            </td>
+                            <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700 tabular-nums">
+                              {crit.weights[2]}
+                            </td>
+                            <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700 tabular-nums">
+                              {crit.weights[3]}
+                            </td>
+                            <td className="p-2 text-center border-r border-slate-300 font-mono text-[11px] text-slate-700 font-bold tabular-nums">
+                              {crit.weights[4]}
+                            </td>
+                            <td className="p-2 text-center border-r border-slate-300 bg-slate-50/30">
+                              <div className="w-10 h-6 border border-slate-300 rounded mx-auto" />
+                            </td>
+                            <td className="p-2">
+                              <div className="border-b border-dotted border-slate-400 h-5" />
+                            </td>
+                          </tr>
+                        </React.Fragment>
+                      );
+                    })}
                   </tbody>
                   <tfoot className="bg-slate-100 font-black border-t-2 border-slate-400">
                     <tr>
@@ -8949,42 +10034,53 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200 font-medium">
-                        {activeCategory.criteria.map(crit => {
+                        {activeCategory.criteria.map((crit, idx) => {
+                          const prevSection = idx > 0 ? activeCategory.criteria[idx - 1].section : null;
+                          const showSectionHeader = Boolean(crit.section && crit.section !== prevSection);
                           const matched = scannedResult.scores.find(s => s.criterionNo === crit.no);
                           const currentScore = matched ? matched.score : crit.weights[3];
                           const currentLabel = matched ? matched.label : 'B';
 
                           return (
-                            <tr key={crit.no} className="hover:bg-slate-50">
-                              <td className="py-2 px-3 text-center text-slate-400">K{crit.no}</td>
-                              <td className="py-2 px-3 font-semibold text-slate-800">{crit.name}</td>
-                              <td className="py-2 px-3 text-center">
-                                <span className="inline-block px-2 py-0.5 rounded font-black text-[11px] bg-blue-100 text-blue-800">
-                                  {currentLabel}
-                                </span>
-                              </td>
-                              <td className="py-2 px-3 text-center font-black text-slate-900 text-sm tabular-nums">
-                                {currentScore} <span className="text-[10px] text-slate-400 font-normal">/ {crit.weights[4]}</span>
-                              </td>
-                              <td className="py-2 px-3 text-center">
-                                <select
-                                  value={currentScore}
-                                  onChange={e => {
-                                    const val = Number(e.target.value);
-                                    const wIdx = crit.weights.indexOf(val);
-                                    const label = wIdx !== -1 ? ['KS', 'K', 'C', 'B', 'A'][wIdx] : 'B';
-                                    handleAdjustScannedScore(crit.no, val, label);
-                                  }}
-                                  className="py-1 px-2 border border-slate-300 rounded-lg text-xs font-bold bg-white text-slate-800 outline-none cursor-pointer"
-                                >
-                                  {crit.weights.map((w, idx) => (
-                                    <option key={idx} value={w}>
-                                      {['KS', 'K', 'C', 'B', 'A'][idx]} ({w} pt)
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
-                            </tr>
+                            <React.Fragment key={crit.no}>
+                              {showSectionHeader && (
+                                <tr className="bg-slate-100 border-y border-slate-200">
+                                  <td colSpan={5} className="py-1.5 px-3 text-[11px] font-extrabold uppercase tracking-wider text-slate-700">
+                                    {crit.section}
+                                  </td>
+                                </tr>
+                              )}
+                              <tr className="hover:bg-slate-50">
+                                <td className="py-2 px-3 text-center text-slate-400 tabular-nums">K{crit.no}</td>
+                                <td className="py-2 px-3 font-semibold text-slate-800">{crit.name}</td>
+                                <td className="py-2 px-3 text-center">
+                                  <span className="inline-block px-2 py-0.5 rounded font-black text-[11px] bg-blue-100 text-blue-800">
+                                    {currentLabel}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3 text-center font-black text-slate-900 text-sm tabular-nums">
+                                  {currentScore} <span className="text-[10px] text-slate-400 font-normal">/ {crit.weights[4]}</span>
+                                </td>
+                                <td className="py-2 px-3 text-center">
+                                  <select
+                                    value={currentScore}
+                                    onChange={e => {
+                                      const val = Number(e.target.value);
+                                      const wIdx = crit.weights.indexOf(val);
+                                      const label = wIdx !== -1 ? ['KS', 'K', 'C', 'B', 'A'][wIdx] : 'B';
+                                      handleAdjustScannedScore(crit.no, val, label);
+                                    }}
+                                    className="py-1 px-2 border border-slate-300 rounded-lg text-xs font-bold bg-white text-slate-800 outline-none cursor-pointer"
+                                  >
+                                    {crit.weights.map((w, wIdx) => (
+                                      <option key={wIdx} value={w}>
+                                        {['KS', 'K', 'C', 'B', 'A'][wIdx]} ({w} pt)
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+                              </tr>
+                            </React.Fragment>
                           );
                         })}
                       </tbody>
@@ -9119,6 +10215,7 @@ export default function App() {
         setPesertaList={setPesertaList}
         currentUser={currentUser}
         setCurrentUser={setCurrentUser}
+        onLogActivity={(cat, title, details) => logActivity(cat, title, details)}
         showToast={showToast}
       />
 
@@ -9159,6 +10256,7 @@ export default function App() {
           const res = await savePaymentConfigToCloud(newCfg);
           if (res.success) {
             setPaymentConfig(newCfg);
+            logActivity('data_edit', 'Ubah Tarif & Payment Gateway', 'Memperbarui konfigurasi biaya pendaftaran & metode pembayaran.');
             showToast('Pengaturan tarif & payment gateway berhasil disimpan ke Cloud!', 'success');
             return true;
           } else {
@@ -9180,6 +10278,7 @@ export default function App() {
           const res = await saveBlankoConfigToCloud(newCfg);
           if (res.success) {
             setBlankoConfig(newCfg);
+            logActivity('data_edit', 'Edit Master Format Blangko', 'Memperbarui template kop surat, syarat berkas, dan tanda tangan blangko.');
             showToast('Format blangko berhasil disimpan ke Cloud!', 'success');
             return true;
           } else {

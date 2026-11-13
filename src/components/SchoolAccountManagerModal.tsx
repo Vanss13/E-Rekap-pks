@@ -24,7 +24,8 @@ import { AppUser, Participant, SchoolLevel } from '../App';
 import {
   saveUserToCloud,
   deleteUserFromCloud,
-  saveParticipantToCloud
+  saveParticipantToCloud,
+  ActivityCategory
 } from '../lib/firebase';
 
 interface SchoolAccountManagerModalProps {
@@ -36,6 +37,7 @@ interface SchoolAccountManagerModalProps {
   setPesertaList: React.Dispatch<React.SetStateAction<Participant[]>>;
   currentUser: AppUser | null;
   setCurrentUser: React.Dispatch<React.SetStateAction<AppUser | null>>;
+  onLogActivity?: (category: ActivityCategory, title: string, details: string) => void;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   onOpenPesertaForSchool?: (schoolName: string) => void;
 }
@@ -49,6 +51,7 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
   setPesertaList,
   currentUser,
   setCurrentUser,
+  onLogActivity,
   showToast
 }) => {
   const [activeTab, setActiveTab] = useState<'list' | 'add' | 'edit'>('list');
@@ -235,7 +238,7 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
           tanggal: new Date().toISOString().split('T')[0],
           juri: 'Belum Ditentukan',
           scores: {
-            pbb: {}, variasi: {}, formasi: {}, danton: {},
+            pbb: {}, danton: {},
             devile: {}, gatur: {}, senam: {}, yelyel: {},
             beladiri: {}, speaking: {}, tenda: {}
           }
@@ -252,6 +255,7 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
       }
     }
 
+    onLogActivity?.('data_edit', 'Buat Akun Sekolah', `Menambahkan akun sekolah "${school}" (@${uname}, ${formData.schoolLevel}).`);
     showToast(`Akun sekolah "${school}" berhasil dibuat!`, 'success');
     resetForm();
     setActiveTab('list');
@@ -318,6 +322,7 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
       sessionStorage.setItem('PBB_PKS_ACTIVE_AUTH_SESSION', JSON.stringify(updatedUser));
     }
 
+    onLogActivity?.('data_edit', 'Edit Akun Sekolah', `Memperbarui akun sekolah "${school}" (@${uname}, ${formData.schoolLevel}).`);
     showToast(`Data akun sekolah "${school}" berhasil diperbarui!`, 'success');
     resetForm();
     setActiveTab('list');
@@ -346,6 +351,7 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
       }
       // Sync delete to Cloud Firestore
       deleteUserFromCloud(user.username);
+      onLogActivity?.('data_delete', 'Hapus Akun Sekolah', `Menghapus akun sekolah "${school}" (@${user.username}).`);
       showToast(`Akun sekolah "${school}" berhasil dihapus.`, 'info');
     }
   };
@@ -407,6 +413,7 @@ export const SchoolAccountManagerModal: React.FC<SchoolAccountManagerModalProps>
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Daftar Akun Sekolah');
     XLSX.writeFile(wb, `Daftar_Akun_Sekolah_PKS_${new Date().toISOString().split('T')[0]}.xlsx`);
+    onLogActivity?.('export', 'Ekspor Excel Akun Sekolah', `Mengunduh daftar ${schoolAccounts.length} akun sekolah (.xlsx).`);
     showToast('File Excel kredensial akun sekolah berhasil diunduh!');
   };
 

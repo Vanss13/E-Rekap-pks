@@ -24,7 +24,7 @@ import {
   FileSpreadsheet,
   Loader2
 } from 'lucide-react';
-import { RegistrationSubmission, deleteRegistrationFromCloud, saveRegistrationToCloud, PaymentConfig } from '../lib/firebase';
+import { RegistrationSubmission, deleteRegistrationFromCloud, saveRegistrationToCloud, PaymentConfig, ActivityCategory } from '../lib/firebase';
 import { AppUser } from '../App';
 
 interface RegistrationSubmissionsAdminViewProps {
@@ -33,6 +33,7 @@ interface RegistrationSubmissionsAdminViewProps {
   paymentConfig?: PaymentConfig;
   onRefresh?: () => void;
   onOpenPaymentSettings?: () => void;
+  onLogActivity?: (category: ActivityCategory, title: string, details: string) => void;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
@@ -42,6 +43,7 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
   paymentConfig,
   onRefresh,
   onOpenPaymentSettings,
+  onLogActivity,
   showToast
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -122,13 +124,17 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
   const filteredSubmissions = useMemo(() => {
     return submissionsList.filter(s => {
       const q = searchQuery.toLowerCase().trim();
+      const matchStudentArray =
+        Array.isArray(s.formData?.students) &&
+        s.formData.students.some((st: any) => (st?.nama || '').toLowerCase().includes(q));
       const matchSearch =
         !q ||
         s.schoolName?.toLowerCase().includes(q) ||
         s.applicantName?.toLowerCase().includes(q) ||
         s.id?.toLowerCase().includes(q) ||
         s.formData?.nisn?.includes(q) ||
-        s.formData?.noHp?.includes(q);
+        s.formData?.noHp?.includes(q) ||
+        matchStudentArray;
 
       const matchForm = filterFormType === 'all' || s.formType === filterFormType;
       const matchLevel = filterLevel === 'all' || s.schoolLevel === filterLevel;
@@ -210,6 +216,11 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
       await saveRegistrationToCloud(updatedSub);
       setSelectedSubmission(updatedSub);
       setVerifyModalType(null);
+      onLogActivity?.(
+        'data_edit',
+        verifyModalType === 'stage1' ? 'Verifikasi Keuangan Pendaftaran' : 'Pengesahan Panitia Pendaftaran',
+        `Berkas "${updatedSub.applicantName}" (${updatedSub.schoolName}) status: ${verifyActionStatus.toUpperCase()}.`
+      );
       showToast(
         verifyModalType === 'stage1'
           ? `Verifikasi Keuangan (Tahap 1) berhasil disimpan!`
@@ -231,6 +242,7 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
         if (selectedSubmission?.id === id) {
           setSelectedSubmission(null);
         }
+        onLogActivity?.('data_delete', 'Hapus Berkas Pendaftaran', `Menghapus pengajuan pendaftaran "${name}" (ID: ${id}).`);
         showToast('Berkas pendaftaran berhasil dihapus dari Cloud.', 'info');
       } catch (err: any) {
         showToast(`Gagal menghapus berkas: ${err.message}`, 'error');
@@ -253,6 +265,12 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
       'Asal Sekolah': s.schoolName,
       'Jenjang': s.schoolLevel,
       'Nama Pendaftar': s.applicantName,
+      'Jumlah Siswa': Array.isArray(s.formData?.students) ? s.formData.students.length : 1,
+      'Daftar Siswa': Array.isArray(s.formData?.students)
+        ? s.formData.students
+            .map((st: any, i: number) => `${i + 1}. ${st?.nama || '-'} (${st?.tempatLahir || '-'}, ${st?.tanggalLahir || '-'} - ${st?.jk || '-'})`)
+            .join('; ')
+        : s.applicantName,
       'No WhatsApp': s.contactWa || s.formData?.noHp || '-',
       'Nominal Biaya': s.feeAmount || 0,
       'Metode Bayar': s.paymentMethod?.toUpperCase() || '-',
@@ -286,6 +304,7 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
     ];
     XLSX.utils.book_append_sheet(wb, ws, 'Rekap_Pendaftaran_PKS');
     XLSX.writeFile(wb, `Rekap_Pendaftaran_PKS_Semua_Sekolah_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    onLogActivity?.('export', 'Ekspor Excel Rekap Pendaftaran', `Mengunduh ${filteredSubmissions.length} data rekap pendaftaran sekolah (.xlsx).`);
     showToast('Rekap pendaftaran berhasil diunduh (.xlsx)', 'success');
   };
 
@@ -470,6 +489,11 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
 
                       <td className="py-3 px-3">
                         <div className="font-bold text-slate-900">{sub.applicantName}</div>
+                        {Array.isArray(sub.formData?.students) && sub.formData.students.length > 1 && (
+                          <div className="text-[11px] text-blue-600 font-semibold">
+                            {sub.formData.students.length} Siswa Terdaftar
+                          </div>
+                        )}
                         <div className="text-[11px] text-slate-500">
                           {sub.contactWa || sub.formData?.noHp || '-'}
                         </div>
@@ -753,10 +777,43 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
               </div>
 
               {/* Rincian Seluruh Isian Formulir */}
-              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                 <h4 className="font-bold text-slate-800 text-xs border-b border-slate-200 pb-1">
                   Data Isian Formulir Siswa
                 </h4>
+                {Array.isArray(selectedSubmission.formData?.students) && selectedSubmission.formData.students.length > 0 && (
+                  <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                    <div className="px-3 py-2 bg-blue-50 border-b border-blue-100 flex items-center justify-between">
+                      <span className="text-[11px] font-bold text-blue-900 uppercase">
+                        Daftar Siswa Terdaftar ({selectedSubmission.formData.students.length} Orang)
+                      </span>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-[11px] border-collapse">
+                        <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                          <tr>
+                            <th className="py-2 px-2.5 text-center w-8">No</th>
+                            <th className="py-2 px-2.5">Nama Lengkap</th>
+                            <th className="py-2 px-2.5">Tempat Lahir</th>
+                            <th className="py-2 px-2.5">Tanggal Lahir</th>
+                            <th className="py-2 px-2.5">Jenis Kelamin</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {selectedSubmission.formData.students.map((st: any, i: number) => (
+                            <tr key={st?.id || i} className="hover:bg-slate-50">
+                              <td className="py-2 px-2.5 text-center text-slate-500 font-mono">{i + 1}</td>
+                              <td className="py-2 px-2.5 font-bold text-slate-900">{st?.nama || '-'}</td>
+                              <td className="py-2 px-2.5 text-slate-700">{st?.tempatLahir || '-'}</td>
+                              <td className="py-2 px-2.5 text-slate-700 font-mono">{st?.tanggalLahir || '-'}</td>
+                              <td className="py-2 px-2.5 text-slate-700">{st?.jk || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
                   {Object.entries(selectedSubmission.formData || {}).map(([key, value]) => {
                     if (typeof value === 'object' || typeof value === 'function') return null;

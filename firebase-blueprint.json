@@ -244,6 +244,91 @@
         }
       },
       "required": ["id", "formType", "schoolName"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Log aktivitas penggunaan aplikasi per akun lengkap dengan koordinat GPS, tanggal, dan waktu",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier log aktivitas",
+          "maxLength": 128
+        },
+        "username": {
+          "type": "string",
+          "description": "Username akun pelaku aktivitas",
+          "maxLength": 100
+        },
+        "userName": {
+          "type": "string",
+          "description": "Nama tampilan akun pelaku aktivitas",
+          "maxLength": 150
+        },
+        "userRole": {
+          "type": "string",
+          "description": "Peran akun saat aktivitas berlangsung",
+          "enum": ["superadmin", "admin", "juri", "sekolah", "user"]
+        },
+        "actionCategory": {
+          "type": "string",
+          "description": "Kategori aktivitas aplikasi",
+          "enum": ["auth", "navigation", "scoring", "registration", "data_edit", "data_delete", "export", "system"]
+        },
+        "actionTitle": {
+          "type": "string",
+          "description": "Judul singkat aktivitas",
+          "maxLength": 150
+        },
+        "details": {
+          "type": "string",
+          "description": "Rincian aktivitas yang dilakukan",
+          "maxLength": 500
+        },
+        "tabContext": {
+          "type": "string",
+          "description": "Konteks halaman atau tab aktif",
+          "maxLength": 80
+        },
+        "locationStatus": {
+          "type": "string",
+          "description": "Status pengambilan koordinat GPS",
+          "enum": ["granted", "denied", "unavailable", "timeout"]
+        },
+        "latitude": {
+          "type": "number",
+          "description": "Koordinat garis lintang perangkat"
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Koordinat garis bujur perangkat"
+        },
+        "accuracy": {
+          "type": "number",
+          "description": "Akurasi GPS dalam satuan meter"
+        },
+        "dateLabel": {
+          "type": "string",
+          "description": "Tanggal lokal aktivitas (YYYY-MM-DD)",
+          "maxLength": 20
+        },
+        "timeLabel": {
+          "type": "string",
+          "description": "Waktu lokal aktivitas (HH:mm:ss)",
+          "maxLength": 20
+        },
+        "timestampIso": {
+          "type": "string",
+          "description": "Timestamp standar ISO-8601",
+          "maxLength": 50
+        },
+        "userAgent": {
+          "type": "string",
+          "description": "Ringkasan perangkat atau browser pengguna",
+          "maxLength": 200
+        }
+      },
+      "required": ["id", "username", "userName", "userRole", "actionCategory", "actionTitle", "locationStatus", "dateLabel", "timeLabel", "timestampIso"]
     }
   },
   "firestore": {
@@ -276,6 +361,12 @@
         "$ref": "#/entities/RegistrationSubmission"
       },
       "description": "Formulir pendaftaran digital 4 jenis kegiatan PKS"
+    },
+    "/activity_logs/{logId}": {
+      "schema": {
+        "$ref": "#/entities/ActivityLog"
+      },
+      "description": "Jejak audit log aktivitas per akun beserta koordinat GPS, tanggal, dan waktu"
     }
   }
 }

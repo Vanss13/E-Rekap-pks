@@ -765,3 +765,112 @@ export async function saveBlankoConfigToCloud(config: BlankoConfig): Promise<{ s
   }
 }
 
+// ==========================================
+// 8. ACTIVITY LOGS (LOG AKTIVITAS PER AKUN)
+// ==========================================
+
+export type ActivityCategory =
+  | 'auth'
+  | 'navigation'
+  | 'scoring'
+  | 'registration'
+  | 'data_edit'
+  | 'data_delete'
+  | 'export'
+  | 'system';
+
+export type LocationCaptureStatus = 'granted' | 'denied' | 'unavailable' | 'timeout';
+
+export interface ActivityLogEntry {
+  id: string;
+  username: string;
+  userName: string;
+  userRole: 'superadmin' | 'admin' | 'juri' | 'sekolah' | 'user';
+  actionCategory: ActivityCategory;
+  actionTitle: string;
+  details: string;
+  tabContext: string;
+  locationStatus: LocationCaptureStatus;
+  latitude: number | null;
+  longitude: number | null;
+  accuracy: number | null;
+  dateLabel: string;
+  timeLabel: string;
+  timestampIso: string;
+  userAgent?: string | null;
+}
+
+export function subscribeToActivityLogs(
+  onUpdate: (logs: ActivityLogEntry[]) => void,
+  onError?: (err: any) => void
+) {
+  const path = 'activity_logs';
+  return onSnapshot(
+    collection(db, path),
+    snapshot => {
+      const items: ActivityLogEntry[] = [];
+      snapshot.forEach(docSnap => {
+        const data = docSnap.data() as ActivityLogEntry;
+        if (data && data.id && data.username) {
+          items.push(data);
+        }
+      });
+      items.sort((a, b) => (b.timestampIso || '').localeCompare(a.timestampIso || ''));
+      onUpdate(items);
+    },
+    error => {
+      handleFirestoreError(error, OperationType.LIST, path);
+      if (onError) onError(error);
+    }
+  );
+}
+
+export async function saveActivityLogToCloud(
+  entry: ActivityLogEntry
+): Promise<{ success: boolean; error?: string }> {
+  if (!entry || !entry.id || !entry.username) {
+    return { success: false, error: 'Log aktivitas tidak valid' };
+  }
+  const path = `activity_logs/${entry.id}`;
+  try {
+    const cleanDoc = sanitizeForFirestore({
+      id: String(entry.id).slice(0, 128),
+      username: String(entry.username).slice(0, 100),
+      userName: String(entry.userName || entry.username).slice(0, 150),
+      userRole: entry.userRole,
+      actionCategory: entry.actionCategory,
+      actionTitle: String(entry.actionTitle).slice(0, 150),
+      details: String(entry.details || '').slice(0, 500),
+      tabContext: String(entry.tabContext || 'dashboard').slice(0, 80),
+      locationStatus: entry.locationStatus,
+      latitude: typeof entry.latitude === 'number' ? entry.latitude : null,
+      longitude: typeof entry.longitude === 'number' ? entry.longitude : null,
+      accuracy: typeof entry.accuracy === 'number' ? entry.accuracy : null,
+      dateLabel: String(entry.dateLabel).slice(0, 20),
+      timeLabel: String(entry.timeLabel).slice(0, 20),
+      timestampIso: String(entry.timestampIso).slice(0, 50),
+      userAgent: entry.userAgent ? String(entry.userAgent).slice(0, 200) : ''
+    });
+    await setDoc(doc(db, 'activity_logs', cleanDoc.id), cleanDoc);
+    return { success: true };
+  } catch (error) {
+    const errInfo = handleFirestoreError(error, OperationType.CREATE, path);
+    return { success: false, error: errInfo.error };
+  }
+}
+
+export async function deleteActivityLogFromCloud(
+  logId: string
+): Promise<{ success: boolean; error?: string }> {
+  if (!logId) return { success: false, error: 'ID log tidak valid' };
+  const path = `activity_logs/${logId}`;
+  try {
+    await deleteDoc(doc(db, 'activity_logs', logId));
+    return { success: true };
+  } catch (error) {
+    const errInfo = handleFirestoreError(error, OperationType.DELETE, path);
+    return { success: false, error: errInfo.error };
+  }
+}
+
+
