@@ -21,8 +21,10 @@ import {
 import {
   ActivityCategory,
   ActivityLogEntry,
-  deleteActivityLogFromCloud
+  deleteActivityLogsBatchFromCloud,
+  deleteAllActivityLogsFromCloud
 } from '../lib/firebase';
+import { persistCachedActivityLogs } from '../lib/activityLogger';
 import { AppUser } from '../App';
 
 interface ActivityLogsAdminViewProps {
@@ -53,6 +55,7 @@ const ROLE_LABELS: Record<string, string> = {
   admin: 'Admin Panitia',
   juri: 'Juri Lapangan',
   sekolah: 'Perwakilan Sekolah',
+  pembina_polres: 'Pembina Polres',
   user: 'Tamu / User'
 };
 
@@ -375,13 +378,16 @@ export const ActivityLogsAdminView: React.FC<ActivityLogsAdminViewProps> = ({
           ? logs
           : logs.filter(l => (l.username || '').toLowerCase() === confirmClearTarget);
 
-      await Promise.allSettled(targetEntries.map(l => deleteActivityLogFromCloud(l.id)));
-
       if (confirmClearTarget === '__ALL__') {
+        await deleteAllActivityLogsFromCloud();
         setLogs([]);
+        persistCachedActivityLogs([]);
         showToast(`Seluruh ${targetEntries.length} log aktivitas berhasil dibersihkan.`, 'info');
       } else {
-        setLogs(prev => prev.filter(l => (l.username || '').toLowerCase() !== confirmClearTarget));
+        await deleteActivityLogsBatchFromCloud(targetEntries.map(l => l.id));
+        const remaining = logs.filter(l => (l.username || '').toLowerCase() !== confirmClearTarget);
+        setLogs(remaining);
+        persistCachedActivityLogs(remaining);
         showToast(
           `${targetEntries.length} log milik akun @${confirmClearTarget} berhasil dihapus.`,
           'info'
@@ -476,7 +482,8 @@ export const ActivityLogsAdminView: React.FC<ActivityLogsAdminViewProps> = ({
                 { key: 'superadmin', label: 'Superadmin' },
                 { key: 'admin', label: 'Admin' },
                 { key: 'juri', label: 'Juri' },
-                { key: 'sekolah', label: 'Sekolah' }
+                { key: 'sekolah', label: 'Sekolah' },
+                { key: 'pembina_polres', label: 'Pembina Polres' }
               ].map(tab => (
                 <button
                   key={tab.key}

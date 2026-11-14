@@ -66,7 +66,9 @@ import {
   Power,
   ShieldAlert,
   CreditCard,
-  Activity
+  Activity,
+  WifiOff,
+  ExternalLink
 } from 'lucide-react';
 import { RegistrationFormsView } from './components/RegistrationFormsView';
 import { RegistrationSubmissionsAdminView } from './components/RegistrationSubmissionsAdminView';
@@ -79,8 +81,11 @@ import { SchoolAccountManagerModal } from './components/SchoolAccountManagerModa
 import { CloudSyncModal } from './components/CloudSyncModal';
 import { AppStatusModal } from './components/AppStatusModal';
 import { AppMaintenanceView } from './components/AppMaintenanceView';
+import { NetworkErrorBanner, NetworkErrorState } from './components/NetworkErrorBanner';
+import { compressImageFile } from './lib/imageUtils';
 import {
   testConnection,
+  CloudWriteResult,
   subscribeToParticipants,
   saveParticipantToCloud,
   deleteParticipantFromCloud,
@@ -107,7 +112,10 @@ import {
   DEFAULT_BLANKO_CONFIG,
   subscribeToActivityLogs,
   ActivityLogEntry,
-  ActivityCategory
+  ActivityCategory,
+  isCloudWriteQuotaExceeded,
+  subscribeToCloudQuota,
+  resetCloudWriteQuotaGuard
 } from './lib/firebase';
 import {
   recordUserActivity,
@@ -120,7 +128,7 @@ import {
 // TYPES & CRITERIA DEFINITIONS
 // ==========================================
 
-export type UserRole = 'superadmin' | 'admin' | 'juri' | 'user' | 'sekolah';
+export type UserRole = 'superadmin' | 'admin' | 'juri' | 'user' | 'sekolah' | 'pembina_polres';
 export type SchoolLevel = 'SLTP' | 'SLTA';
 
 export interface AppUser {
@@ -214,6 +222,7 @@ export interface CategorySummary {
   totalCriteria: number;
   pct: number;
   isComplete: boolean;
+  hasScored: boolean;
   isMandatory: boolean;
 }
 
@@ -224,6 +233,8 @@ export interface CalculatedScores {
   grandPct: number;
   completedCategoriesCount: number;
   totalCategoriesCount: number;
+  totalScoredCriteria: number;
+  hasAnyScore: boolean;
   mandatoryCompleted: boolean;
   isFullyCompleted: boolean;
 }
@@ -459,6 +470,7 @@ const DEFAULT_SYSTEM_USERS: AppUser[] = [
   { username: 'administrator', password: 'adminstrator123', name: 'Administrator Utama (Super Admin)', role: 'superadmin', isCustom: false },
   { username: 'panitia', password: 'panitia123', name: 'Admin Panitia (Akses Terbatas)', role: 'admin', isCustom: false },
   { username: 'juri1', password: 'juri123', name: 'Aiptu Budi Santoso (Juri Lapangan)', role: 'juri', isCustom: false },
+  { username: 'pembinapolres', password: 'pembina123', name: 'Pembina Polres', role: 'pembina_polres', isCustom: false },
   { username: 'user1', password: 'user123', name: 'Kontingen / Tamu Resmi', role: 'user', isCustom: false }
 ];
 
@@ -719,6 +731,7 @@ export function calculateAllCategories(
   let grandTotal = 0;
   let maxGrandTotal = 0;
   let completedCount = 0;
+  let totalScoredCriteria = 0;
   let allMandatoryDone = true;
 
   categories.forEach(cat => {
@@ -735,6 +748,7 @@ export function calculateAllCategories(
 
     const cappedSum = Math.min(cat.maxPoints, sum);
     const isComplete = count === cat.criteria.length;
+    const hasScored = count > 0;
     const pct = cat.maxPoints > 0 ? (cappedSum / cat.maxPoints) * 100 : 0;
 
     summaries[cat.key] = {
@@ -746,11 +760,13 @@ export function calculateAllCategories(
       totalCriteria: cat.criteria.length,
       pct,
       isComplete,
+      hasScored,
       isMandatory: cat.isMandatory
     };
 
     grandTotal += cappedSum;
     maxGrandTotal += cat.maxPoints;
+    totalScoredCriteria += count;
 
     if (isComplete) {
       completedCount++;
@@ -761,6 +777,7 @@ export function calculateAllCategories(
 
   const grandPct = maxGrandTotal > 0 ? (grandTotal / maxGrandTotal) * 100 : 0;
   const isFullyCompleted = allMandatoryDone && completedCount === categories.length;
+  const hasAnyScore = totalScoredCriteria > 0;
 
   return {
     categorySummaries: summaries,
@@ -769,6 +786,8 @@ export function calculateAllCategories(
     grandPct,
     completedCategoriesCount: completedCount,
     totalCategoriesCount: categories.length,
+    totalScoredCriteria,
+    hasAnyScore,
     mandatoryCompleted: allMandatoryDone,
     isFullyCompleted
   };
@@ -798,7 +817,19 @@ export default function App() {
               password: 'adminstrator123'
             };
           }
-          return parsed;
+          const cleanedUsers = parsed.filter(
+            u => !(u.username.toLowerCase() === 'sekolah1' && u.isCustom === false)
+          );
+          if (!cleanedUsers.some(u => u.username.toLowerCase() === 'pembinapolres')) {
+            cleanedUsers.push({
+              username: 'pembinapolres',
+              password: 'pembina123',
+              name: 'Pembina Polres',
+              role: 'pembina_polres',
+              isCustom: false
+            });
+          }
+          return cleanedUsers;
         }
       }
     } catch {
@@ -845,6 +876,8 @@ export default function App() {
   const isAdminRole = Boolean(currentUser && (isSuperAdmin || currentUser.role === 'admin'));
   const canViewPasswords = Boolean(currentUser && (currentUser.role === 'admin' || isSuperAdmin));
   const isUserRole = Boolean(currentUser && currentUser.role === 'user');
+  const isPembinaPolresRole = Boolean(currentUser && currentUser.role === 'pembina_polres');
+  const isSekolahAccount = Boolean(currentUser && currentUser.role === 'sekolah');
 
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -970,7 +1003,7 @@ export default function App() {
   });
   const [showUserPasswords, setShowUserPasswords] = useState<Record<string, boolean>>({});
   const [showEditUserPassword, setShowEditUserPassword] = useState(false);
-  const [userCategoryTab, setUserCategoryTab] = useState<'all' | 'admin' | 'juri' | 'sekolah' | 'user'>('all');
+  const [userCategoryTab, setUserCategoryTab] = useState<'all' | 'admin' | 'juri' | 'sekolah' | 'pembina_polres' | 'user'>('all');
   const [userSearchQuery, setUserSearchQuery] = useState('');
 
   // Modal Pratinjau & Cetak Format Blanko Lembar Penilaian Juri
@@ -1014,47 +1047,68 @@ export default function App() {
     juriName?: string;
   } | null>(null);
 
-  // Sidebar Navigation & Collapsible Dropdown Accordions
+  // Sidebar Navigation & Collapsible Dropdown Accordions (Persisted User-Controlled State)
+  const SIDEBAR_DROPDOWNS_STORAGE_KEY = 'pks_sidebar_dropdowns_v1';
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarCatDropdownOpen, setSidebarCatDropdownOpen] = useState(false);
-  const [sidebarPesertaDropdownOpen, setSidebarPesertaDropdownOpen] = useState(false);
-  const [sidebarFormDropdownOpen, setSidebarFormDropdownOpen] = useState(false);
-  const [sidebarRekapDropdownOpen, setSidebarRekapDropdownOpen] = useState(false);
+
+  const readSavedSidebarDropdowns = (): { cat: boolean; peserta: boolean; rekap: boolean; form: boolean } => {
+    try {
+      const raw = localStorage.getItem(SIDEBAR_DROPDOWNS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          cat: Boolean(parsed?.cat),
+          peserta: Boolean(parsed?.peserta),
+          rekap: Boolean(parsed?.rekap),
+          form: Boolean(parsed?.form),
+        };
+      }
+    } catch {
+      // fallback
+    }
+    return { cat: false, peserta: false, rekap: false, form: false };
+  };
+
+  const [sidebarCatDropdownOpen, setSidebarCatDropdownOpen] = useState<boolean>(() => readSavedSidebarDropdowns().cat);
+  const [sidebarPesertaDropdownOpen, setSidebarPesertaDropdownOpen] = useState<boolean>(() => readSavedSidebarDropdowns().peserta);
+  const [sidebarRekapDropdownOpen, setSidebarRekapDropdownOpen] = useState<boolean>(() => readSavedSidebarDropdowns().rekap);
+  const [sidebarFormDropdownOpen, setSidebarFormDropdownOpen] = useState<boolean>(() => readSavedSidebarDropdowns().form);
   const [sidebarPesertaSearch, setSidebarPesertaSearch] = useState('');
   const [sidebarPesertaJenjang, setSidebarPesertaJenjang] = useState<'all' | 'SLTP' | 'SLTA'>('all');
-  const sidebarNavRef = useRef<HTMLDivElement>(null);
 
-  // Toggle one dropdown and auto-close others
-  const toggleSidebarDropdown = (menu: 'cat' | 'peserta' | 'rekap' | 'form') => {
-    setSidebarCatDropdownOpen(prev => (menu === 'cat' ? !prev : false));
-    setSidebarPesertaDropdownOpen(prev => (menu === 'peserta' ? !prev : false));
-    setSidebarRekapDropdownOpen(prev => (menu === 'rekap' ? !prev : false));
-    setSidebarFormDropdownOpen(prev => (menu === 'form' ? !prev : false));
-  };
-
-  const closeAllSidebarDropdowns = () => {
-    setSidebarCatDropdownOpen(false);
-    setSidebarPesertaDropdownOpen(false);
-    setSidebarRekapDropdownOpen(false);
-    setSidebarFormDropdownOpen(false);
-  };
-
-  // Close dropdowns when clicking outside without selecting
   useEffect(() => {
-    const handleDocumentClick = (e: MouseEvent | TouchEvent) => {
-      if (sidebarNavRef.current && !sidebarNavRef.current.contains(e.target as Node)) {
-        closeAllSidebarDropdowns();
-      }
-    };
+    try {
+      localStorage.setItem(
+        SIDEBAR_DROPDOWNS_STORAGE_KEY,
+        JSON.stringify({
+          cat: sidebarCatDropdownOpen,
+          peserta: sidebarPesertaDropdownOpen,
+          rekap: sidebarRekapDropdownOpen,
+          form: sidebarFormDropdownOpen,
+        })
+      );
+    } catch {
+      // ignore storage errors
+    }
+  }, [sidebarCatDropdownOpen, sidebarPesertaDropdownOpen, sidebarRekapDropdownOpen, sidebarFormDropdownOpen]);
 
-    document.addEventListener('mousedown', handleDocumentClick);
-    document.addEventListener('touchstart', handleDocumentClick);
-    return () => {
-      document.removeEventListener('mousedown', handleDocumentClick);
-      document.removeEventListener('touchstart', handleDocumentClick);
-    };
-  }, []);
+  // Toggle individual dropdown independently without closing others; auto-expand collapsed sidebar
+  const toggleSidebarDropdown = (menu: 'cat' | 'peserta' | 'rekap' | 'form') => {
+    if (sidebarCollapsed) {
+      setSidebarCollapsed(false);
+      if (menu === 'cat') setSidebarCatDropdownOpen(true);
+      else if (menu === 'peserta') setSidebarPesertaDropdownOpen(true);
+      else if (menu === 'rekap') setSidebarRekapDropdownOpen(true);
+      else if (menu === 'form') setSidebarFormDropdownOpen(true);
+      return;
+    }
+
+    if (menu === 'cat') setSidebarCatDropdownOpen(prev => !prev);
+    else if (menu === 'peserta') setSidebarPesertaDropdownOpen(prev => !prev);
+    else if (menu === 'rekap') setSidebarRekapDropdownOpen(prev => !prev);
+    else if (menu === 'form') setSidebarFormDropdownOpen(prev => !prev);
+  };
 
   // Custom Application Logo State
   const [appLogo, setAppLogo] = useState<string | null>(() => {
@@ -1144,7 +1198,7 @@ export default function App() {
   const [dashFilterJenjang, setDashFilterJenjang] = useState<'all' | 'SLTP' | 'SLTA'>('all');
   const [dashSearchSekolah, setDashSearchSekolah] = useState('');
   const [dashAccountSearch, setDashAccountSearch] = useState('');
-  const [dashAccountRoleFilter, setDashAccountRoleFilter] = useState<'all' | 'superadmin' | 'admin' | 'juri' | 'sekolah' | 'user'>('all');
+  const [dashAccountRoleFilter, setDashAccountRoleFilter] = useState<'all' | 'superadmin' | 'admin' | 'juri' | 'sekolah' | 'pembina_polres' | 'user'>('all');
   const [preselectedLogUsername, setPreselectedLogUsername] = useState<string | null>(null);
 
   // State 4 Kerangka Form Pendaftaran Resmi PKS & Polisi Pelajar
@@ -1215,9 +1269,23 @@ export default function App() {
     rekomendasiSatlantas: 'Memenuhi Syarat Kualifikasi Instruktur PKS Balok 2'
   });
 
-  // Proteksi Hak Akses Akun Tamu, Log Aktivitas Khusus Admin, & Pengalihan Tab Lama (Variasi/Formasi -> PBB Terpadu)
+  // Proteksi Hak Akses Akun Tamu, Pembina Polres, Akun Sekolah, Log Aktivitas Khusus Admin, & Pengalihan Tab Lama
   useEffect(() => {
-    if (currentUser?.role === 'user' && currentTab === 'rekap') {
+    if (!currentUser) return;
+    const pembinaPolresAllowedTabs = new Set(['dashboard', 'rekap', 'anggota_pks', 'rekap_pendaftaran']);
+    const sekolahAllowedTabs = new Set([
+      'dashboard',
+      'anggota_pks',
+      'form_polisi_pelajar',
+      'form_calon_pks',
+      'form_perkemahan_balok1',
+      'form_perkemahan_balok2'
+    ]);
+    if (currentUser.role === 'user' && currentTab === 'rekap') {
+      setCurrentTab('dashboard');
+    } else if (currentUser.role === 'pembina_polres' && !pembinaPolresAllowedTabs.has(currentTab)) {
+      setCurrentTab('dashboard');
+    } else if (currentUser.role === 'sekolah' && !sekolahAllowedTabs.has(currentTab)) {
       setCurrentTab('dashboard');
     } else if (currentTab === 'log_aktivitas' && !isAdminRole) {
       setCurrentTab('dashboard');
@@ -1226,15 +1294,15 @@ export default function App() {
     }
   }, [currentUser, currentTab, isAdminRole]);
 
-  // Jam real-time untuk kartu sesi & daftar waktu akun di Dashboard
+  // Jam real-time untuk sub-bar atas, kartu sesi & daftar waktu akun di Dashboard
   useEffect(() => {
-    if (!currentUser || currentTab !== 'dashboard') return;
+    if (!currentUser) return;
     setDashboardNow(new Date());
     const timer = window.setInterval(() => {
       setDashboardNow(new Date());
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [currentUser, currentTab]);
+  }, [currentUser]);
 
   // Catat Aktivitas Navigasi Tab/Menu secara otomatis untuk setiap akun
   useEffect(() => {
@@ -1296,11 +1364,90 @@ export default function App() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Loading, Save Sync Status & Network Error Banner States
+  const [saveSyncStatus, setSaveSyncStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [savingCriterionKeys, setSavingCriterionKeys] = useState<Record<string, boolean>>({});
+  const [isSavingPeserta, setIsSavingPeserta] = useState(false);
+  const [isSavingUser, setIsSavingUser] = useState(false);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [isSavingScanScores, setIsSavingScanScores] = useState(false);
+  const [isActivatingApp, setIsActivatingApp] = useState(false);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+  const [workspaceErrorBanner, setWorkspaceErrorBanner] = useState<NetworkErrorState | null>(null);
+  const [modalErrorBanner, setModalErrorBanner] = useState<NetworkErrorState | null>(null);
+
+  const pesertaListRef = useRef<Participant[]>(pesertaList);
+  pesertaListRef.current = pesertaList;
+  const scoreWriteQueueRef = useRef<Record<string, Promise<void>>>({});
+
+  useEffect(() => {
+    setSaveSyncStatus('idle');
+    setCriteriaSchoolDropdownOpen(false);
+  }, [activePesertaId, currentTab]);
+
+  // Inline School Search inside Assessment Criterion Tabs
+  const [criteriaSchoolSearch, setCriteriaSchoolSearch] = useState('');
+  const [criteriaSchoolDropdownOpen, setCriteriaSchoolDropdownOpen] = useState(false);
+  const criteriaSchoolSearchRef = useRef<HTMLDivElement>(null);
+
   // Cloud Firestore Sync State
   const [cloudStatus, setCloudStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
+  const [cloudQuotaExceeded, setCloudQuotaExceeded] = useState<boolean>(() => isCloudWriteQuotaExceeded());
+  const [quotaBannerDismissed, setQuotaBannerDismissed] = useState(false);
   const [cloudLastSynced, setCloudLastSynced] = useState<Date | null>(null);
   const [modalCloudInfoOpen, setModalCloudInfoOpen] = useState(false);
   const isInitialCloudSyncDone = useRef(false);
+  const migratedParticipantIdsRef = useRef<Set<string>>(new Set());
+  const hasNormalizedUsersRef = useRef(false);
+  const hasAutoMigratedConfigRef = useRef(false);
+
+  useEffect(() => {
+    return subscribeToCloudQuota(exceeded => {
+      setCloudQuotaExceeded(exceeded);
+      if (exceeded) {
+        setCloudStatus('error');
+        setQuotaBannerDismissed(false);
+      }
+    });
+  }, []);
+
+  // Browser Online/Offline listener & click-outside handler for criterion school search dropdown
+  useEffect(() => {
+    const handleOnline = () => {
+      if (isCloudWriteQuotaExceeded()) {
+        setCloudStatus('error');
+        return;
+      }
+      void testConnection().then(ok => {
+        setCloudStatus(ok ? 'connected' : 'offline');
+        if (ok) {
+          setCloudLastSynced(new Date());
+        }
+      });
+    };
+    const handleOffline = () => {
+      setCloudStatus('offline');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        criteriaSchoolSearchRef.current &&
+        !criteriaSchoolSearchRef.current.contains(event.target as Node)
+      ) {
+        setCriteriaSchoolDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // Real-time Cloud Listeners & Auto-Sync
   useEffect(() => {
@@ -1326,26 +1473,50 @@ export default function App() {
 
         // 1. Subscribe to Participants
         unsubParticipants = subscribeToParticipants(
-          cloudPeserta => {
-            setCloudStatus('connected');
-            setCloudLastSynced(new Date());
+          (cloudPeserta, fromCache) => {
+            const isOnline = typeof navigator === 'undefined' || navigator.onLine;
+            if (!fromCache && isOnline && !isCloudWriteQuotaExceeded()) {
+              setCloudStatus('connected');
+              setCloudLastSynced(new Date());
+            } else if (!isOnline) {
+              setCloudStatus('offline');
+            }
+
             if (cloudPeserta && cloudPeserta.length > 0) {
               const normalizedList = cloudPeserta.map(p => {
                 const res = normalizeParticipantScores(p);
-                if (res.migrated) {
-                  saveParticipantToCloud(res.participant);
+                if (
+                  res.migrated &&
+                  !fromCache &&
+                  !isCloudWriteQuotaExceeded() &&
+                  !migratedParticipantIdsRef.current.has(res.participant.id)
+                ) {
+                  migratedParticipantIdsRef.current.add(res.participant.id);
+                  void saveParticipantToCloud(res.participant);
                 }
                 return res.participant;
               });
+              pesertaListRef.current = normalizedList;
               setPesertaList(normalizedList);
               try {
                 localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: normalizedList }));
               } catch {
                 // ignore
               }
-            } else if (!isInitialCloudSyncDone.current && pesertaList.length > 0) {
-              // Seed cloud if cloud is newly created & empty
-              pesertaList.forEach(p => saveParticipantToCloud(p));
+              if (!fromCache) {
+                isInitialCloudSyncDone.current = true;
+              }
+            } else if (
+              !fromCache &&
+              !isInitialCloudSyncDone.current &&
+              !isCloudWriteQuotaExceeded() &&
+              pesertaListRef.current.length > 0
+            ) {
+              // Seed cloud only on verified empty server snapshot
+              isInitialCloudSyncDone.current = true;
+              pesertaListRef.current.forEach(p => {
+                void saveParticipantToCloud(p);
+              });
             }
           },
           err => {
@@ -1356,10 +1527,18 @@ export default function App() {
 
         // 2. Subscribe to Users
         unsubUsers = subscribeToUsers(
-          cloudUsers => {
-            setCloudStatus('connected');
-            setCloudLastSynced(new Date());
+          (cloudUsers, fromCache) => {
+            const isOnline = typeof navigator === 'undefined' || navigator.onLine;
+            if (!fromCache && isOnline && !isCloudWriteQuotaExceeded()) {
+              setCloudStatus('connected');
+              setCloudLastSynced(new Date());
+            } else if (!isOnline) {
+              setCloudStatus('offline');
+            }
+
             if (cloudUsers && cloudUsers.length > 0) {
+              const canWriteUsers = !fromCache && !isCloudWriteQuotaExceeded() && !hasNormalizedUsersRef.current;
+              let didAutoWrite = false;
               const adminIdx = cloudUsers.findIndex(u => u.username?.toLowerCase() === 'administrator');
               if (adminIdx === -1) {
                 const adminAccount: AppUser = {
@@ -1369,7 +1548,10 @@ export default function App() {
                   role: 'superadmin',
                   isCustom: false
                 };
-                saveUserToCloud(adminAccount);
+                if (canWriteUsers) {
+                  didAutoWrite = true;
+                  void saveUserToCloud(adminAccount);
+                }
                 cloudUsers = [...cloudUsers, adminAccount];
               } else if (cloudUsers[adminIdx].password === 'administrator123' || cloudUsers[adminIdx].password === 'administrator1234') {
                 const updatedAdmin: AppUser = {
@@ -1377,8 +1559,44 @@ export default function App() {
                   username: 'administrator',
                   password: 'adminstrator123'
                 };
-                saveUserToCloud(updatedAdmin);
+                if (canWriteUsers) {
+                  didAutoWrite = true;
+                  void saveUserToCloud(updatedAdmin);
+                }
                 cloudUsers = cloudUsers.map((u, i) => (i === adminIdx ? updatedAdmin : u));
+              }
+              const legacySekolah1 = cloudUsers.find(
+                u => u.username?.toLowerCase() === 'sekolah1' && u.isCustom === false
+              );
+              if (legacySekolah1) {
+                if (canWriteUsers) {
+                  didAutoWrite = true;
+                  void deleteUserFromCloud(legacySekolah1.username);
+                }
+                cloudUsers = cloudUsers.filter(
+                  u => !(u.username?.toLowerCase() === 'sekolah1' && u.isCustom === false)
+                );
+              }
+              if (
+                !cloudUsers.some(
+                  u => u.username?.toLowerCase() === 'pembinapolres' || u.role === 'pembina_polres'
+                )
+              ) {
+                const pembinaAccount: AppUser = {
+                  username: 'pembinapolres',
+                  password: 'pembina123',
+                  name: 'Pembina Polres',
+                  role: 'pembina_polres',
+                  isCustom: false
+                };
+                if (canWriteUsers) {
+                  didAutoWrite = true;
+                  void saveUserToCloud(pembinaAccount);
+                }
+                cloudUsers = [...cloudUsers, pembinaAccount];
+              }
+              if (didAutoWrite) {
+                hasNormalizedUsersRef.current = true;
               }
               setUsersList(cloudUsers);
               try {
@@ -1386,9 +1604,17 @@ export default function App() {
               } catch {
                 // ignore
               }
-            } else if (!isInitialCloudSyncDone.current && usersList.length > 0) {
-              // Seed cloud users
-              usersList.forEach(u => saveUserToCloud(u));
+            } else if (
+              !fromCache &&
+              !isInitialCloudSyncDone.current &&
+              !isCloudWriteQuotaExceeded() &&
+              usersList.length > 0
+            ) {
+              // Seed cloud users only on verified empty server snapshot
+              hasNormalizedUsersRef.current = true;
+              usersList.forEach(u => {
+                void saveUserToCloud(u);
+              });
             }
           },
           err => {
@@ -1399,11 +1625,12 @@ export default function App() {
 
         // 3. Subscribe to Config
         unsubConfig = subscribeToConfig(
-          cloudConfig => {
+          (cloudConfig, fromCache) => {
             if (cloudConfig && Array.isArray(cloudConfig) && cloudConfig.length > 0) {
               const { categories: normalizedCats, migrated } = normalizeCategoriesConfig(cloudConfig);
-              if (migrated) {
-                saveConfigToCloud(normalizedCats);
+              if (migrated && !fromCache && !isCloudWriteQuotaExceeded() && !hasAutoMigratedConfigRef.current) {
+                hasAutoMigratedConfigRef.current = true;
+                void saveConfigToCloud(normalizedCats);
               }
               setCategories(normalizedCats);
               setTempCategoriesConfig(normalizedCats);
@@ -1412,8 +1639,14 @@ export default function App() {
               } catch {
                 // ignore
               }
-            } else if (!isInitialCloudSyncDone.current && categories.length > 0) {
-              saveConfigToCloud(categories);
+            } else if (
+              !fromCache &&
+              !isInitialCloudSyncDone.current &&
+              !isCloudWriteQuotaExceeded() &&
+              categories.length > 0
+            ) {
+              hasAutoMigratedConfigRef.current = true;
+              void saveConfigToCloud(categories);
             }
           },
           err => console.error('Cloud config sync error:', err)
@@ -1444,8 +1677,8 @@ export default function App() {
               } catch {
                 // ignore
               }
-            } else if (!isInitialCloudSyncDone.current) {
-              saveAppStatusToCloud(appStatus);
+            } else if (!isInitialCloudSyncDone.current && !isCloudWriteQuotaExceeded()) {
+              void saveAppStatusToCloud(appStatus);
             }
           },
           err => console.error('Cloud app status sync error:', err)
@@ -1505,7 +1738,6 @@ export default function App() {
           err => console.error('Cloud activity logs sync error:', err)
         );
 
-        isInitialCloudSyncDone.current = true;
       } catch (err) {
         console.error('Cloud initialization failed:', err);
         setCloudStatus('offline');
@@ -1530,41 +1762,55 @@ export default function App() {
   // Manual Force Push to Cloud
   const handleForceSyncAll = async () => {
     setCloudStatus('connecting');
+    await resetCloudWriteQuotaGuard();
     try {
       for (const p of pesertaList) {
-        await saveParticipantToCloud(p);
+        const res = await saveParticipantToCloud(p);
+        if (!res.success) throw new Error(res.error || 'Gagal menyinkronkan data peserta.');
       }
       for (const u of usersList) {
-        await saveUserToCloud(u);
+        const res = await saveUserToCloud(u);
+        if (!res.success) throw new Error(res.error || 'Gagal menyinkronkan data pengguna.');
       }
-      await saveConfigToCloud(categories);
+      const cfgRes = await saveConfigToCloud(categories);
+      if (!cfgRes.success) throw new Error(cfgRes.error || 'Gagal menyinkronkan konfigurasi.');
       if (appLogo) {
-        await saveLogoToCloud(appLogo);
+        const logoRes = await saveLogoToCloud(appLogo);
+        if (!logoRes.success) throw new Error(logoRes.error || 'Gagal menyinkronkan logo.');
       }
-      await saveAppStatusToCloud(appStatus);
+      const statusRes = await saveAppStatusToCloud(appStatus);
+      if (!statusRes.success) throw new Error(statusRes.error || 'Gagal menyinkronkan status aplikasi.');
       setCloudStatus('connected');
       setCloudLastSynced(new Date());
     } catch (e) {
       console.error('Force sync error:', e);
-      setCloudStatus('error');
+      setCloudStatus(typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'error');
       throw e;
     }
   };
 
   // Save App Status to Cloud & Local
-  const handleSaveAppStatus = async (newStatus: AppStatusConfig) => {
+  const handleSaveAppStatus = async (newStatus: AppStatusConfig): Promise<CloudWriteResult> => {
+    const res = await saveAppStatusToCloud(newStatus);
+    if (!res.success) {
+      setCloudStatus(res.isNetworkError ? 'offline' : 'error');
+      showToast(res.error || 'Gagal menyimpan status aplikasi ke Cloud.', 'error');
+      return res;
+    }
+    setCloudStatus('connected');
+    setCloudLastSynced(new Date());
     setAppStatus(newStatus);
     try {
       localStorage.setItem(STATUS_STORAGE_KEY, JSON.stringify(newStatus));
     } catch (e) {
       console.error('Storage error', e);
     }
-    await saveAppStatusToCloud(newStatus);
     logActivity(
       'data_edit',
       'Ubah Status Operasional Aplikasi',
       `Status aplikasi diubah menjadi ${newStatus.isActive ? 'AKTIF' : 'NONAKTIF'} (${newStatus.title}).`
     );
+    return res;
   };
 
   // Save Users Data (Local Backup)
@@ -1643,6 +1889,8 @@ export default function App() {
           ? 'Juri Lapangan'
           : found.role === 'sekolah'
           ? 'Perwakilan Sekolah'
+          : found.role === 'pembina_polres'
+          ? 'Pembina Polres'
           : 'Tamu / Peninjau';
 
         setLoginStepText(`Kredensial cocok! Menyiapkan sesi ${roleLabel}...`);
@@ -1652,6 +1900,9 @@ export default function App() {
           setIsLoggingIn(false);
           setCurrentUser(found);
           setSessionLoginAt(loginIso);
+          if (found.role === 'pembina_polres' || found.role === 'sekolah') {
+            setCurrentTab('dashboard');
+          }
           sessionStorage.setItem(AUTH_KEY, JSON.stringify(found));
           try {
             sessionStorage.setItem(AUTH_LOGIN_TIME_KEY, loginIso);
@@ -1682,6 +1933,7 @@ export default function App() {
       );
     }
     setCurrentUser(null);
+    setCurrentTab('dashboard');
     setSessionLoginAt(null);
     setPreselectedLogUsername(null);
     sessionStorage.removeItem(AUTH_KEY);
@@ -1694,7 +1946,7 @@ export default function App() {
   };
 
   // School Self-Registration Handler
-  const handleRegisterSchool = (e: React.FormEvent) => {
+  const handleRegisterSchool = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isRegisteringSchool) return;
     setRegError('');
@@ -1724,7 +1976,7 @@ export default function App() {
 
     setIsRegisteringSchool(true);
 
-    setTimeout(() => {
+    try {
       const newSchoolUser: AppUser = {
         username: usernameLower,
         password: regPassword,
@@ -1737,6 +1989,16 @@ export default function App() {
         isCustom: true
       };
 
+      const userSyncRes = await saveUserToCloud(newSchoolUser);
+      if (!userSyncRes.success) {
+        setCloudStatus(userSyncRes.isNetworkError ? 'offline' : 'error');
+        setRegError(
+          userSyncRes.error ||
+            'Terjadi gangguan jaringan saat mendaftarkan akun sekolah. Silakan periksa koneksi lalu coba lagi.'
+        );
+        return;
+      }
+
       const updatedUsers = [...usersList, newSchoolUser];
       setUsersList(updatedUsers);
       try {
@@ -1744,8 +2006,6 @@ export default function App() {
       } catch {
         // ignore
       }
-      // Sync new school user to Cloud
-      saveUserToCloud(newSchoolUser);
 
       // Auto-create or link a participant profile for this school
       const schoolExists = pesertaList.some(
@@ -1767,6 +2027,10 @@ export default function App() {
             beladiri: {}, speaking: {}, tenda: {}
           }
         };
+        const partSyncRes = await saveParticipantToCloud(newParticipant);
+        if (!partSyncRes.success) {
+          setCloudStatus(partSyncRes.isNetworkError ? 'offline' : 'error');
+        }
         const updatedPeserta = [...pesertaList, newParticipant];
         setPesertaList(updatedPeserta);
         setActivePesertaId(newParticipant.id);
@@ -1775,13 +2039,13 @@ export default function App() {
         } catch {
           // ignore
         }
-        // Sync initial participant to Cloud
-        saveParticipantToCloud(newParticipant);
       }
 
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
       const loginIso = new Date().toISOString();
-      setIsRegisteringSchool(false);
       setCurrentUser(newSchoolUser);
+      setCurrentTab('dashboard');
       setSessionLoginAt(loginIso);
       try {
         sessionStorage.setItem(AUTH_KEY, JSON.stringify(newSchoolUser));
@@ -1796,7 +2060,9 @@ export default function App() {
         { actorOverride: newSchoolUser, forceRefreshLocation: true }
       );
       showToast(`Registrasi Akun Sekolah ${regSekolah} berhasil! Selamat datang.`, 'success');
-    }, 600);
+    } finally {
+      setIsRegisteringSchool(false);
+    }
   };
 
   // Logo Handlers (Super Admin Only)
@@ -1814,15 +2080,22 @@ export default function App() {
     }
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       const dataUrl = event.target?.result as string;
+      const res = await saveLogoToCloud(dataUrl);
+      if (!res.success) {
+        setCloudStatus(res.isNetworkError ? 'offline' : 'error');
+        showToast(res.error || 'Gagal mengunggah logo ke Cloud.', 'error');
+        return;
+      }
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
       setAppLogo(dataUrl);
       try {
         localStorage.setItem(LOGO_STORAGE_KEY, dataUrl);
       } catch (err) {
         console.error('Storage error', err);
       }
-      saveLogoToCloud(dataUrl);
       logActivity('data_edit', 'Unggah Logo Aplikasi', 'Memperbarui gambar logo aplikasi dari perangkat.');
       showToast('Logo aplikasi berhasil diperbarui!', 'success');
       setModalLogoOpen(false);
@@ -1830,41 +2103,61 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
-  const handleResetLogo = () => {
+  const handleResetLogo = async (): Promise<CloudWriteResult> => {
     if (!isSuperAdmin) {
-      showToast('Hanya Administrator Utama yang berhak mereset logo!', 'error');
-      return;
+      const msg = 'Hanya Administrator Utama yang berhak mereset logo!';
+      showToast(msg, 'error');
+      return { success: false, error: msg, isNetworkError: false };
     }
+    const res = await saveLogoToCloud(null);
+    if (!res.success) {
+      setCloudStatus(res.isNetworkError ? 'offline' : 'error');
+      showToast(res.error || 'Gagal mereset logo di Cloud.', 'error');
+      return res;
+    }
+    setCloudStatus('connected');
+    setCloudLastSynced(new Date());
     setAppLogo(null);
     try {
       localStorage.removeItem(LOGO_STORAGE_KEY);
     } catch {
       // ignore
     }
-    saveLogoToCloud(null);
     logActivity('data_edit', 'Reset Logo Aplikasi', 'Mengembalikan logo aplikasi ke lambang default PKS.');
     showToast('Logo dikembalikan ke lambang default PKS.', 'info');
     setModalLogoOpen(false);
+    return res;
   };
 
-  const handleSaveLogoUrl = (customLogo?: string) => {
+  const handleSaveLogoUrl = async (customLogo?: string): Promise<CloudWriteResult> => {
     if (!isSuperAdmin) {
-      showToast('Hanya Administrator Utama yang berhak mengubah logo aplikasi!', 'error');
-      return;
+      const msg = 'Hanya Administrator Utama yang berhak mengubah logo aplikasi!';
+      showToast(msg, 'error');
+      return { success: false, error: msg, isNetworkError: false };
     }
     const logoToSave = customLogo || tempLogoUrl.trim();
-    if (!logoToSave) return;
+    if (!logoToSave) {
+      return { success: false, error: 'Pilih atau tempel gambar logo terlebih dahulu.', isNetworkError: false };
+    }
+    const res = await saveLogoToCloud(logoToSave);
+    if (!res.success) {
+      setCloudStatus(res.isNetworkError ? 'offline' : 'error');
+      showToast(res.error || 'Gagal menyimpan logo ke Cloud.', 'error');
+      return res;
+    }
+    setCloudStatus('connected');
+    setCloudLastSynced(new Date());
     setAppLogo(logoToSave);
     try {
       localStorage.setItem(LOGO_STORAGE_KEY, logoToSave);
     } catch {
       // ignore
     }
-    saveLogoToCloud(logoToSave);
     logActivity('data_edit', 'Ubah Logo Aplikasi', 'Menyimpan pembaruan logo aplikasi.');
     showToast('Logo aplikasi berhasil diperbarui!', 'success');
     setTempLogoUrl('');
     setModalLogoOpen(false);
+    return res;
   };
 
   // Export 4 Registration Forms to Excel (.xlsx)
@@ -2022,6 +2315,7 @@ export default function App() {
       showToast('Admin terbatas tidak diizinkan mengubah akun Administrator Utama!', 'error');
       return;
     }
+    setModalErrorBanner(null);
     setEditingUserOriginalUsername(u.username);
     setUserFormData({
       username: u.username,
@@ -2037,6 +2331,7 @@ export default function App() {
   };
 
   const handleCancelEditUser = () => {
+    setModalErrorBanner(null);
     setEditingUserOriginalUsername(null);
     setUserFormData({
       username: '',
@@ -2051,9 +2346,8 @@ export default function App() {
     setUserFormTab('list');
   };
 
-  const handleUpdateUser = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingUserOriginalUsername) return;
+  const executeUpdateUser = async () => {
+    if (!editingUserOriginalUsername || isSavingUser) return;
 
     const uname = userFormData.username.trim().toLowerCase().replace(/\s+/g, '');
     const pwd = userFormData.password.trim();
@@ -2064,7 +2358,6 @@ export default function App() {
       return;
     }
 
-    // Periksa jika username diubah dan apakah bentrok dengan user lain
     if (
       uname !== editingUserOriginalUsername.toLowerCase() &&
       usersList.some(u => u.username.toLowerCase() === uname)
@@ -2090,53 +2383,77 @@ export default function App() {
       name: dname,
       role: finalRole,
       isCustom: originalUser?.isCustom ?? true,
-      schoolName: finalRole === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : (originalUser?.schoolName || ''),
+      schoolName: finalRole === 'sekolah' ? (userFormData.schoolName?.trim() || '') : (originalUser?.schoolName || ''),
       schoolLevel: finalRole === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : (originalUser?.schoolLevel || 'SLTP'),
       pembinaName: finalRole === 'sekolah' ? (userFormData.pembinaName?.trim() || '') : (originalUser?.pembinaName || ''),
       contactWa: finalRole === 'sekolah' ? (userFormData.contactWa?.trim() || '') : (originalUser?.contactWa || '')
     };
 
-    const newUsersList = usersList.map(u => (u.username === editingUserOriginalUsername ? updatedUser : u));
-    setUsersList(newUsersList);
+    setModalErrorBanner(null);
+    setIsSavingUser(true);
+
     try {
-      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(newUsersList));
-    } catch {
-      // ignore
-    }
+      const syncRes = await saveUserToCloud(updatedUser);
+      if (!syncRes.success) {
+        setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+        setModalErrorBanner({
+          title: syncRes.isNetworkError
+            ? 'Gagal Memperbarui Akun (Gangguan Jaringan)'
+            : 'Gagal Menyimpan Perubahan Akun',
+          message: syncRes.error || 'Terjadi gangguan jaringan saat menyimpan perubahan akun ke Cloud.',
+          isNetworkError: syncRes.isNetworkError,
+          onRetry: () => void executeUpdateUser()
+        });
+        showToast(syncRes.error || 'Gagal menyimpan perubahan akun ke Cloud.', 'error');
+        return;
+      }
 
-    // Jika username berubah, hapus dokumen lama di cloud
-    if (uname !== editingUserOriginalUsername.toLowerCase()) {
-      deleteUserFromCloud(editingUserOriginalUsername);
-    }
-    const syncRes = await saveUserToCloud(updatedUser);
-    if (syncRes.success) {
+      if (uname !== editingUserOriginalUsername.toLowerCase()) {
+        await deleteUserFromCloud(editingUserOriginalUsername);
+      }
+
+      setCloudStatus('connected');
       setCloudLastSynced(new Date());
-    }
 
-    // Jika akun yang sedang login saat ini diubah, sinkronkan ke currentUser dan sessionStorage
-    if (currentUser && currentUser.username === editingUserOriginalUsername) {
-      setCurrentUser(updatedUser);
-      sessionStorage.setItem(AUTH_KEY, JSON.stringify(updatedUser));
-    }
+      const newUsersList = usersList.map(u => (u.username === editingUserOriginalUsername ? updatedUser : u));
+      setUsersList(newUsersList);
+      try {
+        localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(newUsersList));
+      } catch {
+        // ignore
+      }
 
-    setEditingUserOriginalUsername(null);
-    setUserFormData({
-      username: '',
-      password: '',
-      name: '',
-      role: 'juri',
-      schoolName: '',
-      schoolLevel: 'SLTP',
-      pembinaName: '',
-      contactWa: ''
-    });
-    setUserFormTab('list');
-    logActivity('data_edit', 'Edit Akun Pengguna', `Memperbarui akun @${uname} (${dname}, peran: ${finalRole}).`);
-    showToast(`Akun "${dname}" berhasil diperbarui & tersinkron ke Cloud!`, 'success');
+      if (currentUser && currentUser.username === editingUserOriginalUsername) {
+        setCurrentUser(updatedUser);
+        sessionStorage.setItem(AUTH_KEY, JSON.stringify(updatedUser));
+      }
+
+      setEditingUserOriginalUsername(null);
+      setUserFormData({
+        username: '',
+        password: '',
+        name: '',
+        role: 'juri',
+        schoolName: '',
+        schoolLevel: 'SLTP',
+        pembinaName: '',
+        contactWa: ''
+      });
+      setUserFormTab('list');
+      logActivity('data_edit', 'Edit Akun Pengguna', `Memperbarui akun @${uname} (${dname}, peran: ${finalRole}).`);
+      showToast(`Akun "${dname}" berhasil diperbarui & tersinkron ke Cloud!`, 'success');
+    } finally {
+      setIsSavingUser(false);
+    }
   };
 
-  const handleSaveUser = async (e: React.FormEvent) => {
+  const handleUpdateUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    await executeUpdateUser();
+  };
+
+  const executeSaveUser = async () => {
+    if (isSavingUser) return;
     const uname = userFormData.username.trim().toLowerCase().replace(/\s+/g, '');
     const pwd = userFormData.password.trim();
     const dname = userFormData.name.trim();
@@ -2159,40 +2476,99 @@ export default function App() {
       name: dname,
       role: requestedRole,
       isCustom: true,
-      schoolName: requestedRole === 'sekolah' ? (userFormData.schoolName?.trim() || dname) : '',
+      schoolName: requestedRole === 'sekolah' ? (userFormData.schoolName?.trim() || '') : '',
       schoolLevel: requestedRole === 'sekolah' ? (userFormData.schoolLevel || 'SLTP') : 'SLTP',
       pembinaName: requestedRole === 'sekolah' ? (userFormData.pembinaName?.trim() || '') : '',
       contactWa: requestedRole === 'sekolah' ? (userFormData.contactWa?.trim() || '') : ''
     };
 
-    const newUsersList = [...usersList, newUser];
-    setUsersList(newUsersList);
+    setModalErrorBanner(null);
+    setIsSavingUser(true);
+
     try {
-      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(newUsersList));
-    } catch {
-      // ignore
-    }
+      const syncRes = await saveUserToCloud(newUser);
+      if (!syncRes.success) {
+        setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+        setModalErrorBanner({
+          title: syncRes.isNetworkError
+            ? 'Gagal Menyimpan Pengguna Baru (Gangguan Jaringan)'
+            : 'Gagal Menyimpan Pengguna Baru',
+          message: syncRes.error || 'Terjadi gangguan jaringan saat menyimpan pengguna ke Cloud.',
+          isNetworkError: syncRes.isNetworkError,
+          onRetry: () => void executeSaveUser()
+        });
+        showToast(syncRes.error || 'Gagal menyimpan pengguna ke Cloud.', 'error');
+        return;
+      }
 
-    const syncRes = await saveUserToCloud(newUser);
-    logActivity('data_edit', 'Tambah Akun Pengguna', `Membuat akun baru @${uname} (${dname}, peran: ${newUser.role}).`);
-    if (syncRes.success) {
+      setCloudStatus('connected');
       setCloudLastSynced(new Date());
-      showToast(`Pengguna baru "${dname}" (${newUser.role.toUpperCase()}) berhasil dibuat & tersinkron ke Cloud!`, 'success');
-    } else {
-      showToast(`Pengguna dibuat lokal. Sinkron Cloud: ${syncRes.error || 'cek koneksi'}`, 'info');
-    }
 
-    setUserFormData({
-      username: '',
-      password: '',
-      name: '',
-      role: 'juri',
-      schoolName: '',
-      schoolLevel: 'SLTP',
-      pembinaName: '',
-      contactWa: ''
-    });
-    setUserFormTab('list');
+      const newUsersList = [...usersList, newUser];
+      setUsersList(newUsersList);
+      try {
+        localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(newUsersList));
+      } catch {
+        // ignore
+      }
+
+      logActivity('data_edit', 'Tambah Akun Pengguna', `Membuat akun baru @${uname} (${dname}, peran: ${newUser.role}).`);
+      showToast(`Pengguna baru "${dname}" (${newUser.role.toUpperCase()}) berhasil dibuat & tersinkron ke Cloud!`, 'success');
+
+      setUserFormData({
+        username: '',
+        password: '',
+        name: '',
+        role: 'juri',
+        schoolName: '',
+        schoolLevel: 'SLTP',
+        pembinaName: '',
+        contactWa: ''
+      });
+      setUserFormTab('list');
+    } finally {
+      setIsSavingUser(false);
+    }
+  };
+
+  const handleSaveUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSaveUser();
+  };
+
+  const executeDeleteUserCloud = async (usernameToDelete: string) => {
+    setConfirmLoading(true);
+    try {
+      const res = await deleteUserFromCloud(usernameToDelete);
+      if (!res.success) {
+        setCloudStatus(res.isNetworkError ? 'offline' : 'error');
+        setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        setWorkspaceErrorBanner({
+          title: 'Gagal Menghapus Akun Pengguna di Cloud',
+          message: res.error || 'Terjadi gangguan jaringan saat menghapus pengguna dari Cloud.',
+          isNetworkError: res.isNetworkError,
+          onRetry: () => executeDeleteUserCloud(usernameToDelete)
+        });
+        showToast(res.error || 'Gagal menghapus pengguna dari Cloud.', 'error');
+        return;
+      }
+
+      const filtered = usersList.filter(u => u.username !== usernameToDelete);
+      setUsersList(filtered);
+      try {
+        localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(filtered));
+      } catch {
+        // ignore
+      }
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
+      setWorkspaceErrorBanner(null);
+      logActivity('data_delete', 'Hapus Akun Pengguna', `Menghapus akun pengguna @${usernameToDelete}.`);
+      setConfirmModal(prev => ({ ...prev, isOpen: false }));
+      showToast('Akun pengguna berhasil dihapus dari Cloud & lokal.', 'info');
+    } finally {
+      setConfirmLoading(false);
+    }
   };
 
   const handleDeleteUser = (usernameToDelete: string) => {
@@ -2217,26 +2593,34 @@ export default function App() {
       message: `Yakin ingin menghapus akun pengguna "${usernameToDelete}"? Pengguna ini tidak akan bisa login lagi.`,
       confirmText: 'Hapus Pengguna',
       isDanger: true,
-      onConfirm: async () => {
-        const filtered = usersList.filter(u => u.username !== usernameToDelete);
-        setUsersList(filtered);
-        try {
-          localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(filtered));
-        } catch {
-          // ignore
-        }
-        await deleteUserFromCloud(usernameToDelete);
-        logActivity('data_delete', 'Hapus Akun Pengguna', `Menghapus akun pengguna @${usernameToDelete}.`);
-        setCloudLastSynced(new Date());
-        setConfirmModal(prev => ({ ...prev, isOpen: false }));
-        showToast('Akun pengguna berhasil dihapus dari Cloud & lokal.', 'info');
-      }
+      onConfirm: () => executeDeleteUserCloud(usernameToDelete)
     });
   };
 
+  // Strict data isolation for Sekolah accounts (hanya melihat data sekolahnya sendiri)
+  const scopedPesertaList = useMemo(() => {
+    if (currentUser?.role !== 'sekolah') return pesertaList;
+    const ownSchool = (currentUser.schoolName || currentUser.name || '').toLowerCase().trim();
+    if (!ownSchool) return [];
+    return pesertaList.filter(p => (p.sekolah || '').toLowerCase().trim() === ownSchool);
+  }, [pesertaList, currentUser]);
+
+  const scopedRegistrationsList = useMemo(() => {
+    if (currentUser?.role !== 'sekolah') return registrationsList;
+    const ownUsername = (currentUser.username || '').toLowerCase().trim();
+    const ownSchool = (currentUser.schoolName || currentUser.name || '').toLowerCase().trim();
+    return registrationsList.filter(sub => {
+      const subUser = (sub.schoolUsername || '').toLowerCase().trim();
+      const subSchool = (sub.schoolName || '').toLowerCase().trim();
+      const matchUser = Boolean(ownUsername && subUser && subUser === ownUsername);
+      const matchSchool = Boolean(ownSchool && subSchool && subSchool === ownSchool);
+      return matchUser || matchSchool;
+    });
+  }, [registrationsList, currentUser]);
+
   const activePeserta = useMemo(() => {
-    return pesertaList.find(p => p.id === activePesertaId) || null;
-  }, [pesertaList, activePesertaId]);
+    return scopedPesertaList.find(p => p.id === activePesertaId) || scopedPesertaList[0] || null;
+  }, [scopedPesertaList, activePesertaId]);
 
   const activeCalc = useMemo(() => {
     return calculateAllCategories(activePeserta, categories);
@@ -2250,7 +2634,7 @@ export default function App() {
   // Live Map of Participant Totals & Completed Categories for Sidebar Badges
   const pesertaSummariesMap = useMemo(() => {
     const map: Record<string, { totalPoints: number; isComplete: boolean; completedCats: number }> = {};
-    pesertaList.forEach(p => {
+    scopedPesertaList.forEach(p => {
       const calc = calculateAllCategories(p, categories);
       map[p.id] = {
         totalPoints: calc ? calc.grandTotal : 0,
@@ -2259,16 +2643,11 @@ export default function App() {
       };
     });
     return map;
-  }, [pesertaList, categories]);
+  }, [scopedPesertaList, categories]);
 
   // Filtered Participants specifically for Sidebar Dropdown
   const filteredSidebarPeserta = useMemo(() => {
-    return pesertaList.filter(p => {
-      const matchSchool =
-        currentUser?.role === 'sekolah' && currentUser.schoolName
-          ? p.sekolah.toLowerCase().trim() === currentUser.schoolName.toLowerCase().trim()
-          : true;
-
+    return scopedPesertaList.filter(p => {
       const matchSearch =
         sidebarPesertaSearch.trim() === '' ||
         p.nomor.toLowerCase().includes(sidebarPesertaSearch.toLowerCase()) ||
@@ -2278,22 +2657,18 @@ export default function App() {
       const matchJenjang =
         sidebarPesertaJenjang === 'all' || p.jenjang === sidebarPesertaJenjang;
 
-      return matchSchool && matchSearch && matchJenjang;
+      return matchSearch && matchJenjang;
     });
-  }, [pesertaList, sidebarPesertaSearch, sidebarPesertaJenjang, currentUser]);
+  }, [scopedPesertaList, sidebarPesertaSearch, sidebarPesertaJenjang]);
 
   // Calculation of School Assessment Progress for the Dashboard Chart
   const dashboardProgressStats = useMemo(() => {
-    const list = pesertaList.filter(p => {
-      const matchSchool =
-        currentUser?.role === 'sekolah' && currentUser.schoolName
-          ? p.sekolah.toLowerCase().trim() === currentUser.schoolName.toLowerCase().trim()
-          : true;
+    const list = scopedPesertaList.filter(p => {
       const matchJenjang = dashFilterJenjang === 'all' || p.jenjang === dashFilterJenjang;
       const matchSearch = dashSearchSekolah.trim() === '' ||
         p.sekolah.toLowerCase().includes(dashSearchSekolah.toLowerCase()) ||
         (p.peleton && p.peleton.toLowerCase().includes(dashSearchSekolah.toLowerCase()));
-      return matchSchool && matchJenjang && matchSearch;
+      return matchJenjang && matchSearch;
     });
 
     const totalRegistered = list.length;
@@ -2503,106 +2878,224 @@ export default function App() {
 
   // Quick navigation to previous / next participant
   const handlePrevPeserta = () => {
-    if (pesertaList.length === 0) return;
-    const currentIndex = pesertaList.findIndex(p => p.id === activePesertaId);
+    if (scopedPesertaList.length === 0) return;
+    const currentIndex = scopedPesertaList.findIndex(p => p.id === activePesertaId);
     if (currentIndex > 0) {
-      setActivePesertaId(pesertaList[currentIndex - 1].id);
+      setActivePesertaId(scopedPesertaList[currentIndex - 1].id);
     } else {
-      setActivePesertaId(pesertaList[pesertaList.length - 1].id);
+      setActivePesertaId(scopedPesertaList[scopedPesertaList.length - 1].id);
     }
   };
 
   const handleNextPeserta = () => {
-    if (pesertaList.length === 0) return;
-    const currentIndex = pesertaList.findIndex(p => p.id === activePesertaId);
-    if (currentIndex >= 0 && currentIndex < pesertaList.length - 1) {
-      setActivePesertaId(pesertaList[currentIndex + 1].id);
+    if (scopedPesertaList.length === 0) return;
+    const currentIndex = scopedPesertaList.findIndex(p => p.id === activePesertaId);
+    if (currentIndex >= 0 && currentIndex < scopedPesertaList.length - 1) {
+      setActivePesertaId(scopedPesertaList[currentIndex + 1].id);
     } else {
-      setActivePesertaId(pesertaList[0].id);
+      setActivePesertaId(scopedPesertaList[0].id);
     }
   };
 
-  // Handle Score Selection
-  const handleScoreSelect = (categoryKey: CategoryKey, criterionNo: number, val: number | null) => {
-    if (!currentUser || currentUser.role === 'user' || currentUser.role === 'sekolah') {
+  // Handle Score Selection (serialized per participant to prevent concurrent overwrite races)
+  const executeScoreMutation = (
+    targetParticipantId: string,
+    categoryKey: CategoryKey,
+    criterionNo: number,
+    val: number | null
+  ): Promise<void> => {
+    const rowKey = `${targetParticipantId}:${categoryKey}:${criterionNo}`;
+    const prevChain = scoreWriteQueueRef.current[targetParticipantId] || Promise.resolve();
+
+    const nextTask = prevChain.then(async () => {
+      const targetParticipant = pesertaListRef.current.find(p => p.id === targetParticipantId);
+      if (!targetParticipant) return;
+
+      const previousVal = targetParticipant.scores?.[categoryKey]?.[criterionNo];
+      const currentCatScores = { ...(targetParticipant.scores?.[categoryKey] || {}) };
+      if (val === null) {
+        delete currentCatScores[criterionNo];
+      } else {
+        currentCatScores[criterionNo] = val;
+      }
+
+      const updatedJudge = currentUser?.role === 'juri' ? currentUser.name : targetParticipant.juri;
+      const updatedP: Participant = {
+        ...targetParticipant,
+        juri: updatedJudge,
+        scores: {
+          ...targetParticipant.scores,
+          [categoryKey]: currentCatScores
+        }
+      };
+
+      setSavingCriterionKeys(prev => ({ ...prev, [rowKey]: true }));
+      setSaveSyncStatus('saving');
+      setWorkspaceErrorBanner(null);
+
+      // Keep ref & React state synchronized immediately for queued sibling updates
+      const nextList = pesertaListRef.current.map(p => (p.id === targetParticipantId ? updatedP : p));
+      pesertaListRef.current = nextList;
+      setPesertaList(nextList);
+
+      try {
+        const syncRes = await saveParticipantToCloud(updatedP);
+        if (!syncRes.success) {
+          if (syncRes.isQuotaError) {
+            // Keep local optimistic update safely in state & localStorage when Cloud daily write quota is exhausted
+            try {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: pesertaListRef.current }));
+            } catch {
+              // ignore storage limit
+            }
+            setSaveSyncStatus('idle');
+            setCloudStatus('error');
+            const catTitle = categories.find(c => c.key === categoryKey)?.shortTitle || categoryKey;
+            logActivity(
+              'scoring',
+              `Input Nilai Lokal ${catTitle} (Poin ${criterionNo})`,
+              `Peserta No. ${targetParticipant.nomor} ${targetParticipant.sekolah}: nilai poin ${criterionNo} disimpan lokal (${val === null ? 'Kosong' : val}) karena kuota Cloud penuh.`
+            );
+            showToast('Nilai disimpan secara lokal (Kuota tulis Cloud harian sedang penuh).', 'info');
+            return;
+          }
+
+          // Roll back ONLY this criterion on the latest participant snapshot for network/permission/payload failures
+          const rollbackList = pesertaListRef.current.map(p => {
+            if (p.id !== targetParticipantId) return p;
+            const revertedCat = { ...(p.scores?.[categoryKey] || {}) };
+            if (previousVal === undefined || previousVal === null) {
+              delete revertedCat[criterionNo];
+            } else {
+              revertedCat[criterionNo] = previousVal;
+            }
+            return {
+              ...p,
+              scores: {
+                ...p.scores,
+                [categoryKey]: revertedCat
+              }
+            };
+          });
+          pesertaListRef.current = rollbackList;
+          setPesertaList(rollbackList);
+
+          setSaveSyncStatus('error');
+          setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+          setWorkspaceErrorBanner({
+            title: syncRes.isNetworkError
+              ? 'Gagal Menyimpan Nilai (Gangguan Jaringan)'
+              : 'Gagal Menyimpan Nilai ke Cloud',
+            message:
+              syncRes.error ||
+              'Terjadi kesalahan jaringan saat mengirim nilai ke Cloud. Perubahan belum tersinkron.',
+            isNetworkError: syncRes.isNetworkError,
+            onRetry: () => {
+              void executeScoreMutation(targetParticipantId, categoryKey, criterionNo, val);
+            }
+          });
+          showToast(syncRes.error || 'Gagal menyimpan nilai ke Cloud.', 'error');
+          return;
+        }
+
+        setSaveSyncStatus('saved');
+        setCloudStatus('connected');
+        setCloudLastSynced(new Date());
+        const catTitle = categories.find(c => c.key === categoryKey)?.shortTitle || categoryKey;
+        logActivity(
+          'scoring',
+          `Input Nilai ${catTitle} (Poin ${criterionNo})`,
+          `Peserta No. ${targetParticipant.nomor} ${targetParticipant.sekolah}: nilai poin ${criterionNo} diubah menjadi ${val === null ? 'Kosong' : val}.`
+        );
+        showToast('Nilai tersimpan & tersinkron ke Cloud');
+      } finally {
+        setSavingCriterionKeys(prev => {
+          if (!prev[rowKey]) return prev;
+          const next = { ...prev };
+          delete next[rowKey];
+          return next;
+        });
+      }
+    });
+
+    scoreWriteQueueRef.current[targetParticipantId] = nextTask.catch(() => undefined);
+    return nextTask;
+  };
+
+  const handleScoreSelect = async (categoryKey: CategoryKey, criterionNo: number, val: number | null) => {
+    if (!currentUser || currentUser.role === 'user' || currentUser.role === 'sekolah' || currentUser.role === 'pembina_polres') {
       showToast('Akses ditolak: Penginputan nilai hanya dapat dilakukan oleh Panitia / Juri!', 'error');
       return;
     }
-    if (!activePesertaId) return;
-
-    setPesertaList(prev =>
-      prev.map(p => {
-        if (p.id !== activePesertaId) return p;
-        const currentCatScores = { ...(p.scores[categoryKey] || {}) };
-        if (val === null) {
-          delete currentCatScores[criterionNo];
-        } else {
-          currentCatScores[criterionNo] = val;
-        }
-        const updatedJudge = currentUser.role === 'juri' ? currentUser.name : p.juri;
-        const updatedP = {
-          ...p,
-          juri: updatedJudge,
-          scores: {
-            ...p.scores,
-            [categoryKey]: currentCatScores
-          }
-        };
-        saveParticipantToCloud(updatedP);
-        return updatedP;
-      })
-    );
-    setCloudLastSynced(new Date());
-    const targetP = pesertaList.find(p => p.id === activePesertaId);
-    const catTitle = categories.find(c => c.key === categoryKey)?.shortTitle || categoryKey;
-    logActivity(
-      'scoring',
-      `Input Nilai ${catTitle} (Poin ${criterionNo})`,
-      `Peserta ${targetP ? `No. ${targetP.nomor} ${targetP.sekolah}` : activePesertaId}: nilai poin ${criterionNo} diubah menjadi ${val === null ? 'Kosong' : val}.`
-    );
-    showToast('Nilai tersimpan & tersinkron otomatis ke Cloud');
+    const targetParticipant = activePeserta;
+    if (!targetParticipant) return;
+    await executeScoreMutation(targetParticipant.id, categoryKey, criterionNo, val);
   };
 
   // Reset a Category's Scores
+  const executeResetCategoryCloud = async (catKey: CategoryKey, participantSnapshot: Participant, catName: string) => {
+    const updatedScores = { ...participantSnapshot.scores, [catKey]: {} };
+    const updatedP: Participant = { ...participantSnapshot, scores: updatedScores };
+    setConfirmLoading(true);
+    setSaveSyncStatus('saving');
+    setWorkspaceErrorBanner(null);
+
+    try {
+      const syncRes = await saveParticipantToCloud(updatedP);
+      if (!syncRes.success) {
+        setSaveSyncStatus('error');
+        setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+        setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        setWorkspaceErrorBanner({
+          title: 'Gagal Mengosongkan Nilai di Cloud',
+          message: syncRes.error || 'Terjadi gangguan jaringan saat mereset nilai kategori.',
+          isNetworkError: syncRes.isNetworkError,
+          onRetry: () => executeResetCategoryCloud(catKey, participantSnapshot, catName)
+        });
+        showToast(syncRes.error || 'Gagal mereset nilai ke Cloud.', 'error');
+        return;
+      }
+
+      const nextList = pesertaListRef.current.map(p => (p.id === participantSnapshot.id ? updatedP : p));
+      pesertaListRef.current = nextList;
+      setPesertaList(nextList);
+      setSaveSyncStatus('saved');
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
+      setConfirmModal(prev => ({ ...prev, isOpen: false }));
+      logActivity(
+        'data_delete',
+        `Reset Nilai ${catName}`,
+        `Mengosongkan seluruh nilai kategori ${catName} untuk peserta No. ${participantSnapshot.nomor} (${participantSnapshot.sekolah}).`
+      );
+      showToast(`Nilai ${catName} telah dikosongkan & disinkronkan ke Cloud.`, 'info');
+    } finally {
+      setConfirmLoading(false);
+    }
+  };
+
   const handleResetCategory = (catKey: CategoryKey) => {
-    if (!currentUser || currentUser.role === 'user') return;
+    if (!currentUser || currentUser.role === 'user' || currentUser.role === 'sekolah' || currentUser.role === 'pembina_polres') return;
     if (!activePeserta) return;
 
     const cat = categories.find(c => c.key === catKey);
     const catName = cat?.title || catKey;
+    const participantSnapshot = activePeserta;
 
     setConfirmModal({
       isOpen: true,
       title: `Reset Nilai ${catName}?`,
-      message: `Semua nilai yang telah diinput untuk kategori ${catName} pada peserta "${activePeserta.peleton || activePeserta.sekolah}" akan dikosongkan.`,
+      message: `Semua nilai yang telah diinput untuk kategori ${catName} pada peserta "${participantSnapshot.peleton || participantSnapshot.sekolah}" akan dikosongkan.`,
       confirmText: 'Kosongkan Nilai',
       isDanger: true,
-      onConfirm: () => {
-        setPesertaList(prev =>
-          prev.map(p => {
-            if (p.id !== activePeserta.id) return p;
-            const updatedScores = { ...p.scores };
-            updatedScores[catKey] = {};
-            const updatedP = { ...p, scores: updatedScores };
-            saveParticipantToCloud(updatedP);
-            return updatedP;
-          })
-        );
-        setConfirmModal(prev => ({ ...prev, isOpen: false }));
-        logActivity(
-          'data_delete',
-          `Reset Nilai ${catName}`,
-          `Mengosongkan seluruh nilai kategori ${catName} untuk peserta No. ${activePeserta.nomor} (${activePeserta.sekolah}).`
-        );
-        showToast(`Nilai ${catName} telah dikosongkan.`, 'info');
-      }
+      onConfirm: () => executeResetCategoryCloud(catKey, participantSnapshot, catName)
     });
   };
 
   // ============================================================
   // UPLOAD & SCAN FOTO FORM PENILAIAN JURI (AI GEMINI VISION)
   // ============================================================
-  const handlePhotoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -2611,15 +3104,26 @@ export default function App() {
       return;
     }
 
+    if (file.size > 8 * 1024 * 1024) {
+      showToast('Ukuran berkas foto maksimal 8 MB!', 'error');
+      return;
+    }
+
     setScanFileName(file.name);
     setScanError(null);
     setScannedResult(null);
 
-    const reader = new FileReader();
-    reader.onload = event => {
-      setScanPreviewUrl(event.target?.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressedDataUrl = await compressImageFile(file, {
+        maxDimension: 1280,
+        maxDataUrlBytes: 550 * 1024
+      });
+      setScanPreviewUrl(compressedDataUrl);
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal memproses foto lembar penilaian.', 'error');
+      setScanFileName('');
+      setScanPreviewUrl(null);
+    }
   };
 
   const handleScanPhotoWithAI = async () => {
@@ -2697,54 +3201,77 @@ export default function App() {
     });
   };
 
-  const handleApplyScannedScores = () => {
-    if (!activePesertaId || !scannedResult || !activeCategory) return;
+  const handleApplyScannedScores = async () => {
+    if (!activePeserta || !scannedResult || !activeCategory || isSavingScanScores) return;
 
-    setPesertaList(prev =>
-      prev.map(p => {
-        if (p.id !== activePesertaId) return p;
+    const currentCatScores = { ...(activePeserta.scores[activeCategory.key] || {}) };
+    scannedResult.scores.forEach(s => {
+      currentCatScores[s.criterionNo] = s.score;
+    });
 
-        const currentCatScores = { ...(p.scores[activeCategory.key] || {}) };
-        scannedResult.scores.forEach(s => {
-          currentCatScores[s.criterionNo] = s.score;
+    const updatedJudge =
+      currentUser?.role === 'juri'
+        ? currentUser.name
+        : scannedResult.detectedJuri || activePeserta.juri;
+
+    const updatedPhotos: Partial<Record<CategoryKey, FormPhotoData>> = {
+      ...(activePeserta.formPhotos || {}),
+      [activeCategory.key]: {
+        url: scanPreviewUrl || '',
+        uploadTime: new Date().toLocaleString('id-ID'),
+        juriName: updatedJudge,
+        fileName: scanFileName,
+        notes: scannedResult.notes
+      }
+    };
+
+    const updatedP: Participant = {
+      ...activePeserta,
+      juri: updatedJudge,
+      scores: {
+        ...activePeserta.scores,
+        [activeCategory.key]: currentCatScores
+      },
+      formPhotos: updatedPhotos
+    };
+
+    setModalErrorBanner(null);
+    setIsSavingScanScores(true);
+    setSaveSyncStatus('saving');
+
+    try {
+      const syncRes = await saveParticipantToCloud(updatedP);
+      if (!syncRes.success) {
+        setSaveSyncStatus('error');
+        setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+        setModalErrorBanner({
+          title: syncRes.isNetworkError
+            ? 'Gagal Menerapkan Nilai Scan (Gangguan Jaringan)'
+            : 'Gagal Menyimpan Hasil Scan ke Cloud',
+          message: syncRes.error || 'Terjadi gangguan jaringan saat menyimpan nilai dan foto form juri.',
+          isNetworkError: syncRes.isNetworkError,
+          onRetry: () => void handleApplyScannedScores()
         });
+        showToast(syncRes.error || 'Gagal menyimpan hasil scan ke Cloud.', 'error');
+        return;
+      }
 
-        const updatedJudge = currentUser?.role === 'juri' ? currentUser.name : (scannedResult.detectedJuri || p.juri);
-
-        const updatedPhotos: Partial<Record<CategoryKey, FormPhotoData>> = {
-          ...(p.formPhotos || {}),
-          [activeCategory.key]: {
-            url: scanPreviewUrl || '',
-            uploadTime: new Date().toLocaleString('id-ID'),
-            juriName: updatedJudge,
-            fileName: scanFileName,
-            notes: scannedResult.notes
-          }
-        };
-
-        const updatedP = {
-          ...p,
-          juri: updatedJudge,
-          scores: {
-            ...p.scores,
-            [activeCategory.key]: currentCatScores
-          },
-          formPhotos: updatedPhotos
-        };
-        saveParticipantToCloud(updatedP);
-        return updatedP;
-      })
-    );
-
-    setModalScanOpen(false);
-    setScanPreviewUrl(null);
-    setScannedResult(null);
-    logActivity(
-      'scoring',
-      `Terapkan Hasil Scan Nilai ${activeCategory.shortTitle}`,
-      `Menerapkan ${scannedResult.scores.length} butir nilai hasil scan foto untuk peserta No. ${activePeserta?.nomor || '-'} (${activePeserta?.sekolah || '-'}).`
-    );
-    showToast(`Nilai ${activeCategory.title} dari foto berhasil diterapkan!`);
+      setPesertaList(prev => prev.map(p => (p.id === updatedP.id ? updatedP : p)));
+      setSaveSyncStatus('saved');
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
+      setModalScanOpen(false);
+      setScanPreviewUrl(null);
+      setScannedResult(null);
+      logActivity(
+        'scoring',
+        `Terapkan Hasil Scan Nilai ${activeCategory.shortTitle}`,
+        `Menerapkan ${scannedResult.scores.length} butir nilai hasil scan foto untuk peserta No. ${updatedP.nomor || '-'} (${updatedP.sekolah || '-'}).`
+      );
+      showToast(`Nilai ${activeCategory.title} dari foto berhasil diterapkan & tersinkron ke Cloud!`);
+    } finally {
+      setIsSavingScanScores(false);
+    }
   };
 
   const handleOpenViewPhoto = (catKey: CategoryKey) => {
@@ -2768,8 +3295,9 @@ export default function App() {
 
   // Participant Form Handlers
   const openNewPesertaModal = () => {
-    if (!currentUser || currentUser.role === 'user') return;
+    if (!currentUser || currentUser.role === 'user' || currentUser.role === 'pembina_polres') return;
     const nextNo = (pesertaList.length + 1).toString().padStart(2, '0');
+    setModalErrorBanner(null);
     setPesertaFormData({
       nomor: nextNo,
       peleton: '', // Opsional
@@ -2783,11 +3311,12 @@ export default function App() {
   };
 
   const openEditPesertaModal = (p: Participant) => {
-    if (!currentUser || currentUser.role === 'user') return;
+    if (!currentUser || currentUser.role === 'user' || currentUser.role === 'pembina_polres') return;
     if (currentUser.role === 'sekolah' && currentUser.schoolName && p.sekolah.toLowerCase().trim() !== currentUser.schoolName.toLowerCase().trim()) {
       showToast('Akses ditolak: Anda hanya dapat mengelola peserta sekolah Anda sendiri!', 'error');
       return;
     }
+    setModalErrorBanner(null);
     setPesertaFormData({
       nomor: p.nomor,
       peleton: p.peleton || '',
@@ -2800,89 +3329,171 @@ export default function App() {
     setModalPesertaOpen(true);
   };
 
-  const handleSavePeserta = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeSavePeserta = async () => {
+    if (isSavingPeserta) return;
     if (!pesertaFormData.nomor.trim() || !pesertaFormData.sekolah.trim()) {
       showToast('Nomor Peserta dan Nama Sekolah wajib diisi!', 'error');
       return;
     }
 
-    if (editingPesertaId) {
-      const existing = pesertaList.find(p => p.id === editingPesertaId);
-      const updatedParticipant: Participant = {
-        ...(existing || ({} as Participant)),
-        id: editingPesertaId,
-        nomor: pesertaFormData.nomor.trim(),
-        peleton: pesertaFormData.peleton.trim(),
-        jenjang: pesertaFormData.jenjang,
-        sekolah: pesertaFormData.sekolah.trim(),
-        tanggal: pesertaFormData.tanggal,
-        juri: pesertaFormData.juri.trim(),
-        scores: existing?.scores || {
-          pbb: {}, danton: {},
-          devile: {}, gatur: {}, senam: {}, yelyel: {},
-          beladiri: {}, speaking: {}, tenda: {}
+    setModalErrorBanner(null);
+    setIsSavingPeserta(true);
+
+    try {
+      if (editingPesertaId) {
+        const existing = pesertaList.find(p => p.id === editingPesertaId);
+        const updatedParticipant: Participant = {
+          ...(existing || ({} as Participant)),
+          id: editingPesertaId,
+          nomor: pesertaFormData.nomor.trim(),
+          peleton: pesertaFormData.peleton.trim(),
+          jenjang: pesertaFormData.jenjang,
+          sekolah: pesertaFormData.sekolah.trim(),
+          tanggal: pesertaFormData.tanggal,
+          juri: pesertaFormData.juri.trim(),
+          scores: existing?.scores || {
+            pbb: {}, danton: {},
+            devile: {}, gatur: {}, senam: {}, yelyel: {},
+            beladiri: {}, speaking: {}, tenda: {}
+          }
+        };
+
+        const syncRes = await saveParticipantToCloud(updatedParticipant);
+        if (!syncRes.success) {
+          setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+          setModalErrorBanner({
+            title: syncRes.isNetworkError
+              ? 'Gagal Memperbarui Peserta (Gangguan Jaringan)'
+              : 'Gagal Menyimpan Perubahan Peserta',
+            message: syncRes.error || 'Terjadi gangguan jaringan saat menyimpan perubahan data peserta ke Cloud.',
+            isNetworkError: syncRes.isNetworkError,
+            onRetry: () => void executeSavePeserta()
+          });
+          showToast(syncRes.error || 'Gagal menyimpan data peserta ke Cloud.', 'error');
+          return;
         }
-      };
-      const updatedList = pesertaList.map(p => (p.id === editingPesertaId ? updatedParticipant : p));
-      setPesertaList(updatedList);
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedList }));
-      } catch {
-        // ignore
-      }
-      const syncRes = await saveParticipantToCloud(updatedParticipant);
-      if (syncRes.success) {
-        setCloudLastSynced(new Date());
-      }
-      logActivity(
-        'data_edit',
-        'Edit Data Peserta Lomba',
-        `Memperbarui peserta No. ${updatedParticipant.nomor} (${updatedParticipant.sekolah} · ${updatedParticipant.jenjang}).`
-      );
-      showToast('Data peserta berhasil diperbarui & tersinkron otomatis ke Cloud!', 'success');
-    } else {
-      const newId = 'p-' + Date.now();
-      const newParticipant: Participant = {
-        id: newId,
-        nomor: pesertaFormData.nomor.trim(),
-        peleton: pesertaFormData.peleton.trim(),
-        jenjang: pesertaFormData.jenjang,
-        sekolah: pesertaFormData.sekolah.trim(),
-        tanggal: pesertaFormData.tanggal,
-        juri: pesertaFormData.juri.trim(),
-        scores: {
-          pbb: {},
-          danton: {},
-          devile: {},
-          gatur: {},
-          senam: {},
-          yelyel: {},
-          beladiri: {},
-          speaking: {},
-          tenda: {}
+
+        const updatedList = pesertaList.map(p => (p.id === editingPesertaId ? updatedParticipant : p));
+        setPesertaList(updatedList);
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedList }));
+        } catch {
+          // ignore
         }
-      };
-      const updatedList = [...pesertaList, newParticipant];
-      setPesertaList(updatedList);
-      setActivePesertaId(newId);
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedList }));
-      } catch {
-        // ignore
-      }
-      const syncRes = await saveParticipantToCloud(newParticipant);
-      if (syncRes.success) {
+        setCloudStatus('connected');
         setCloudLastSynced(new Date());
+        logActivity(
+          'data_edit',
+          'Edit Data Peserta Lomba',
+          `Memperbarui peserta No. ${updatedParticipant.nomor} (${updatedParticipant.sekolah} · ${updatedParticipant.jenjang}).`
+        );
+        showToast('Data peserta berhasil diperbarui & tersinkron otomatis ke Cloud!', 'success');
+      } else {
+        const newId = 'p-' + Date.now();
+        const newParticipant: Participant = {
+          id: newId,
+          nomor: pesertaFormData.nomor.trim(),
+          peleton: pesertaFormData.peleton.trim(),
+          jenjang: pesertaFormData.jenjang,
+          sekolah: pesertaFormData.sekolah.trim(),
+          tanggal: pesertaFormData.tanggal,
+          juri: pesertaFormData.juri.trim(),
+          scores: {
+            pbb: {},
+            danton: {},
+            devile: {},
+            gatur: {},
+            senam: {},
+            yelyel: {},
+            beladiri: {},
+            speaking: {},
+            tenda: {}
+          }
+        };
+
+        const syncRes = await saveParticipantToCloud(newParticipant);
+        if (!syncRes.success) {
+          setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+          setModalErrorBanner({
+            title: syncRes.isNetworkError
+              ? 'Gagal Menambah Peserta Baru (Gangguan Jaringan)'
+              : 'Gagal Menyimpan Peserta Baru',
+            message: syncRes.error || 'Terjadi gangguan jaringan saat menyimpan peserta baru ke Cloud.',
+            isNetworkError: syncRes.isNetworkError,
+            onRetry: () => void executeSavePeserta()
+          });
+          showToast(syncRes.error || 'Gagal menyimpan peserta baru ke Cloud.', 'error');
+          return;
+        }
+
+        const updatedList = [...pesertaList, newParticipant];
+        setPesertaList(updatedList);
+        setActivePesertaId(newId);
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: updatedList }));
+        } catch {
+          // ignore
+        }
+        setCloudStatus('connected');
+        setCloudLastSynced(new Date());
+        logActivity(
+          'registration',
+          'Tambah Peserta Lomba Baru',
+          `Menambahkan peserta No. ${newParticipant.nomor} (${newParticipant.sekolah} · ${newParticipant.jenjang}).`
+        );
+        showToast(`Peserta baru "${newParticipant.peleton || newParticipant.sekolah}" berhasil ditambahkan & tersinkron otomatis ke Cloud!`, 'success');
       }
-      logActivity(
-        'registration',
-        'Tambah Peserta Lomba Baru',
-        `Menambahkan peserta No. ${newParticipant.nomor} (${newParticipant.sekolah} · ${newParticipant.jenjang}).`
-      );
-      showToast(`Peserta baru "${newParticipant.peleton || newParticipant.sekolah}" berhasil ditambahkan & tersinkron otomatis ke Cloud!`, 'success');
+      setModalPesertaOpen(false);
+    } finally {
+      setIsSavingPeserta(false);
     }
-    setModalPesertaOpen(false);
+  };
+
+  const handleSavePeserta = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSavePeserta();
+  };
+
+  const executeDeletePesertaCloud = async (id: string, target: Participant) => {
+    setConfirmLoading(true);
+    try {
+      const res = await deleteParticipantFromCloud(id);
+      if (!res.success) {
+        setCloudStatus(res.isNetworkError ? 'offline' : 'error');
+        setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        setWorkspaceErrorBanner({
+          title: 'Gagal Menghapus Peserta di Cloud',
+          message: res.error || 'Terjadi gangguan jaringan saat menghapus peserta dari Cloud.',
+          isNetworkError: res.isNetworkError,
+          onRetry: () => executeDeletePesertaCloud(id, target)
+        });
+        showToast(res.error || 'Gagal menghapus peserta dari Cloud.', 'error');
+        return;
+      }
+
+      const filtered = pesertaList.filter(p => p.id !== id);
+      setPesertaList(filtered);
+      if (activePesertaId === id) {
+        setActivePesertaId(filtered.length > 0 ? filtered[0].id : null);
+      }
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: filtered }));
+      } catch {
+        // ignore
+      }
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
+      setWorkspaceErrorBanner(null);
+      logActivity(
+        'data_delete',
+        'Hapus Peserta Lomba',
+        `Menghapus peserta No. ${target.nomor} (${target.sekolah} · ${target.jenjang}).`
+      );
+      setConfirmModal(prev => ({ ...prev, isOpen: false }));
+      showToast('Peserta berhasil dihapus dari Cloud & lokal.', 'info');
+    } finally {
+      setConfirmLoading(false);
+    }
   };
 
   const handleDeletePeserta = (id: string) => {
@@ -2899,31 +3510,73 @@ export default function App() {
       message: `Yakin ingin menghapus peserta "${target.peleton || target.sekolah}" (No. ${target.nomor}) beserta seluruh rekap nilainya? Tindakan ini tidak dapat dibatalkan.`,
       confirmText: 'Hapus Peserta',
       isDanger: true,
-      onConfirm: async () => {
-        const filtered = pesertaList.filter(p => p.id !== id);
-        setPesertaList(filtered);
-        if (activePesertaId === id) {
-          setActivePesertaId(filtered.length > 0 ? filtered[0].id : null);
-        }
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify({ pesertaList: filtered }));
-        } catch {
-          // ignore
-        }
-        await deleteParticipantFromCloud(id);
-        logActivity(
-          'data_delete',
-          'Hapus Peserta Lomba',
-          `Menghapus peserta No. ${target.nomor} (${target.sekolah} · ${target.jenjang}).`
-        );
-        setCloudLastSynced(new Date());
-        setConfirmModal(prev => ({ ...prev, isOpen: false }));
-        showToast('Peserta berhasil dihapus dari Cloud & lokal.', 'error');
-      }
+      onConfirm: () => executeDeletePesertaCloud(id, target)
     });
   };
 
-  // Reset All System Data (Super Admin Only)
+  // Reset All System Data (Super Admin Only, synced to Cloud)
+  const executeResetAllDataCloud = async () => {
+    setConfirmLoading(true);
+    setSaveSyncStatus('saving');
+    setWorkspaceErrorBanner(null);
+
+    try {
+      const initialIds = new Set(INITIAL_PESERTA.map(p => p.id));
+      const toDelete = pesertaListRef.current.filter(p => !initialIds.has(p.id));
+
+      for (const item of toDelete) {
+        const delRes = await deleteParticipantFromCloud(item.id);
+        if (!delRes.success) {
+          setSaveSyncStatus('error');
+          setCloudStatus(delRes.isNetworkError ? 'offline' : 'error');
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          setWorkspaceErrorBanner({
+            title: 'Gagal Mereset Semua Data di Cloud',
+            message: delRes.error || 'Terjadi gangguan jaringan saat menghapus data lama di Cloud.',
+            isNetworkError: delRes.isNetworkError,
+            onRetry: executeResetAllDataCloud
+          });
+          showToast(delRes.error || 'Gagal mereset data di Cloud.', 'error');
+          return;
+        }
+      }
+
+      for (const baseItem of INITIAL_PESERTA) {
+        const saveRes = await saveParticipantToCloud(baseItem);
+        if (!saveRes.success) {
+          setSaveSyncStatus('error');
+          setCloudStatus(saveRes.isNetworkError ? 'offline' : 'error');
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          setWorkspaceErrorBanner({
+            title: 'Gagal Memulihkan Data Awal ke Cloud',
+            message: saveRes.error || 'Terjadi gangguan jaringan saat mengirim data awal ke Cloud.',
+            isNetworkError: saveRes.isNetworkError,
+            onRetry: executeResetAllDataCloud
+          });
+          showToast(saveRes.error || 'Gagal memulihkan data awal ke Cloud.', 'error');
+          return;
+        }
+      }
+
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+      pesertaListRef.current = INITIAL_PESERTA;
+      setPesertaList(INITIAL_PESERTA);
+      setActivePesertaId(INITIAL_PESERTA[0]?.id || null);
+      setSaveSyncStatus('saved');
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
+      setConfirmModal(prev => ({ ...prev, isOpen: false }));
+      logActivity('data_delete', 'Reset Semua Data Sistem', 'Mengembalikan seluruh basis data peserta dan nilai ke setelan awal di Cloud.');
+      showToast('Basis data Cloud & lokal telah direset ke setelan awal.', 'info');
+    } finally {
+      setConfirmLoading(false);
+    }
+  };
+
   const handleResetAllData = () => {
     if (!isSuperAdmin) {
       showToast('Hanya Administrator Utama (Super Admin) yang berhak mereset seluruh data sistem!', 'error');
@@ -2933,17 +3586,10 @@ export default function App() {
     setConfirmModal({
       isOpen: true,
       title: 'Reset Semua Data Sistem?',
-      message: 'PERINGATAN: Seluruh daftar peserta dan nilai yang telah diinput akan dihapus dan dikembalikan ke data awal demo. Tindakan ini permanen.',
+      message: 'PERINGATAN: Seluruh daftar peserta dan nilai yang telah diinput di Cloud akan dihapus dan dikembalikan ke data awal demo. Tindakan ini permanen.',
       confirmText: 'Reset Total Data',
       isDanger: true,
-      onConfirm: () => {
-        localStorage.removeItem(STORAGE_KEY);
-        setPesertaList(INITIAL_PESERTA);
-        setActivePesertaId(INITIAL_PESERTA[0].id);
-        setConfirmModal(prev => ({ ...prev, isOpen: false }));
-        logActivity('data_delete', 'Reset Semua Data Sistem', 'Mengembalikan seluruh basis data peserta dan nilai ke setelan awal.');
-        showToast('Basis data telah direset ke setelan awal.', 'info');
-      }
+      onConfirm: executeResetAllDataCloud
     });
   };
 
@@ -2973,7 +3619,7 @@ export default function App() {
     }
 
     const reader = new FileReader();
-    reader.onload = event => {
+    reader.onload = async event => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (Array.isArray(parsed.pesertaList)) {
@@ -2981,22 +3627,37 @@ export default function App() {
             (p: Participant) => normalizeParticipantScores(p).participant
           );
           setPesertaList(normalizedPeserta);
-          normalizedPeserta.forEach((p: Participant) => saveParticipantToCloud(p));
+          let hasSyncError = false;
+          for (const p of normalizedPeserta) {
+            const res = await saveParticipantToCloud(p);
+            if (!res.success) hasSyncError = true;
+          }
           if (Array.isArray(parsed.categories)) {
             const normalizedCats = normalizeCategoriesConfig(parsed.categories).categories;
             setCategories(normalizedCats);
             setTempCategoriesConfig(normalizedCats);
-            saveConfigToCloud(normalizedCats);
+            const cfgRes = await saveConfigToCloud(normalizedCats);
+            if (!cfgRes.success) hasSyncError = true;
           }
           if (Array.isArray(parsed.usersList)) {
             setUsersList(parsed.usersList);
-            parsed.usersList.forEach((u: AppUser) => saveUserToCloud(u));
+            for (const u of parsed.usersList) {
+              const uRes = await saveUserToCloud(u);
+              if (!uRes.success) hasSyncError = true;
+            }
           }
           if (normalizedPeserta.length > 0) {
             setActivePesertaId(normalizedPeserta[0].id);
           }
-          logActivity('data_edit', 'Pulihkan Data (JSON)', `Memulihkan ${normalizedPeserta.length} data peserta dari file cadangan JSON.`);
-          showToast('Data cadangan berhasil dipulihkan dan disinkronkan ke Cloud!');
+          if (hasSyncError) {
+            setCloudStatus(typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'error');
+            showToast('Data dipulihkan lokal, sebagian sinkronisasi Cloud gagal.', 'error');
+          } else {
+            setCloudStatus('connected');
+            setCloudLastSynced(new Date());
+            logActivity('data_edit', 'Pulihkan Data (JSON)', `Memulihkan ${normalizedPeserta.length} data peserta dari file cadangan JSON.`);
+            showToast('Data cadangan berhasil dipulihkan dan disinkronkan ke Cloud!');
+          }
         } else {
           showToast('Format file JSON tidak sesuai struktur aplikasi!', 'error');
         }
@@ -3009,29 +3670,76 @@ export default function App() {
   };
 
   // Administrator Configuration Save (Super Admin Only)
-  const handleSaveCategoriesConfig = (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeSaveCategoriesConfig = async () => {
+    if (isSavingConfig) return;
     if (!isSuperAdmin) {
       showToast('Hanya Administrator Utama yang berhak mengubah ketentuan juknis!', 'error');
       return;
     }
-    setCategories(tempCategoriesConfig);
-    saveConfigToCloud(tempCategoriesConfig);
-    setModalConfigOpen(false);
-    logActivity('data_edit', 'Ubah Juknis Nilai Maksimal', 'Memperbarui konfigurasi bobot kriteria & nilai maksimal lomba.');
-    showToast('Ketentuan nilai maksimal juknis berhasil diperbarui!');
+    setModalErrorBanner(null);
+    setIsSavingConfig(true);
+    try {
+      const syncRes = await saveConfigToCloud(tempCategoriesConfig);
+      if (!syncRes.success) {
+        setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+        setModalErrorBanner({
+          title: syncRes.isNetworkError
+            ? 'Gagal Menyimpan Juknis (Gangguan Jaringan)'
+            : 'Gagal Menyimpan Konfigurasi Juknis',
+          message: syncRes.error || 'Terjadi gangguan jaringan saat menyimpan konfigurasi nilai maksimal ke Cloud.',
+          isNetworkError: syncRes.isNetworkError,
+          onRetry: () => void executeSaveCategoriesConfig()
+        });
+        showToast(syncRes.error || 'Gagal menyimpan konfigurasi juknis ke Cloud.', 'error');
+        return;
+      }
+
+      setCategories(tempCategoriesConfig);
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
+      setModalConfigOpen(false);
+      logActivity('data_edit', 'Ubah Juknis Nilai Maksimal', 'Memperbarui konfigurasi bobot kriteria & nilai maksimal lomba.');
+      showToast('Ketentuan nilai maksimal juknis berhasil diperbarui & tersinkron ke Cloud!');
+    } finally {
+      setIsSavingConfig(false);
+    }
   };
 
-  const handleResetCategoriesToDefault = () => {
+  const handleSaveCategoriesConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSaveCategoriesConfig();
+  };
+
+  const handleResetCategoriesToDefault = async () => {
+    if (isSavingConfig) return;
     if (!isSuperAdmin) {
       showToast('Hanya Administrator Utama yang berhak mengembalikan juknis standar!', 'error');
       return;
     }
-    setTempCategoriesConfig(DEFAULT_CATEGORIES);
-    setCategories(DEFAULT_CATEGORIES);
-    saveConfigToCloud(DEFAULT_CATEGORIES);
-    logActivity('data_edit', 'Reset Juknis Nilai Maksimal', 'Mengembalikan konfigurasi bobot dan juknis ke standar awal.');
-    showToast('Konfigurasi dikembalikan ke standar awal.');
+    setModalErrorBanner(null);
+    setIsSavingConfig(true);
+    try {
+      const syncRes = await saveConfigToCloud(DEFAULT_CATEGORIES);
+      if (!syncRes.success) {
+        setCloudStatus(syncRes.isNetworkError ? 'offline' : 'error');
+        setModalErrorBanner({
+          title: 'Gagal Mengembalikan Juknis Standar di Cloud',
+          message: syncRes.error || 'Terjadi gangguan jaringan saat mereset juknis.',
+          isNetworkError: syncRes.isNetworkError,
+          onRetry: () => void handleResetCategoriesToDefault()
+        });
+        showToast(syncRes.error || 'Gagal mereset konfigurasi ke Cloud.', 'error');
+        return;
+      }
+      setTempCategoriesConfig(DEFAULT_CATEGORIES);
+      setCategories(DEFAULT_CATEGORIES);
+      setCloudStatus('connected');
+      setCloudLastSynced(new Date());
+      logActivity('data_edit', 'Reset Juknis Nilai Maksimal', 'Mengembalikan konfigurasi bobot dan juknis ke standar awal.');
+      showToast('Konfigurasi dikembalikan ke standar awal & tersinkron ke Cloud.');
+    } finally {
+      setIsSavingConfig(false);
+    }
   };
 
   // ============================================================
@@ -3138,9 +3846,9 @@ export default function App() {
         };
       });
 
-      // Peringkat Kategori Umum (Gabungan SLTP & SLTA)
+      // Peringkat Kategori Umum (Gabungan SLTP & SLTA) — minimal 1 poin terisi sudah masuk peringkat
       const qualified = list
-        .filter(item => item.catSummary.isComplete)
+        .filter(item => item.catSummary.hasScored)
         .sort((a, b) => b.catSummary.sum - a.catSummary.sum);
 
       let rCounter = 1;
@@ -3193,19 +3901,19 @@ export default function App() {
         jenjangCatRank: jenjangRankMap.get(item.id) || null
       }));
 
-      // Urutkan leaderboard: yang lengkap di atas sesuai peringkat nilai, sisanya di bawah
+      // Urutkan leaderboard: yang sudah ada nilai terisi di atas sesuai peringkat, yang kosong di bawah
       fullLeaderboard.sort((a, b) => {
-        if (a.catSummary.isComplete && b.catSummary.isComplete) {
+        if (a.catSummary.hasScored && b.catSummary.hasScored) {
           return (a.catRank || 999) - (b.catRank || 999);
         }
-        if (a.catSummary.isComplete) return -1;
-        if (b.catSummary.isComplete) return 1;
+        if (a.catSummary.hasScored) return -1;
+        if (b.catSummary.hasScored) return 1;
         return (a.nomor || '').localeCompare(b.nomor || '');
       });
 
       // Top 3 Podium Kategori SLTP (Mandiri)
       const topThreeSLTP = fullLeaderboard
-        .filter(item => (item.jenjang || 'SLTP') === 'SLTP' && item.catSummary.isComplete && item.jenjangCatRank !== null && item.jenjangCatRank <= 3)
+        .filter(item => (item.jenjang || 'SLTP') === 'SLTP' && item.catSummary.hasScored && item.jenjangCatRank !== null && item.jenjangCatRank <= 3)
         .sort((a, b) => (a.jenjangCatRank || 99) - (b.jenjangCatRank || 99))
         .slice(0, 3)
         .map(item => ({
@@ -3217,7 +3925,7 @@ export default function App() {
 
       // Top 3 Podium Kategori SLTA (Mandiri)
       const topThreeSLTA = fullLeaderboard
-        .filter(item => item.jenjang === 'SLTA' && item.catSummary.isComplete && item.jenjangCatRank !== null && item.jenjangCatRank <= 3)
+        .filter(item => item.jenjang === 'SLTA' && item.catSummary.hasScored && item.jenjangCatRank !== null && item.jenjangCatRank <= 3)
         .sort((a, b) => (a.jenjangCatRank || 99) - (b.jenjangCatRank || 99))
         .slice(0, 3)
         .map(item => ({
@@ -3231,22 +3939,22 @@ export default function App() {
       const leaderboardSLTP = fullLeaderboard
         .filter(item => (item.jenjang || 'SLTP') === 'SLTP')
         .sort((a, b) => {
-          if (a.catSummary.isComplete && b.catSummary.isComplete) {
+          if (a.catSummary.hasScored && b.catSummary.hasScored) {
             return (a.jenjangCatRank || 999) - (b.jenjangCatRank || 999);
           }
-          if (a.catSummary.isComplete) return -1;
-          if (b.catSummary.isComplete) return 1;
+          if (a.catSummary.hasScored) return -1;
+          if (b.catSummary.hasScored) return 1;
           return (a.nomor || '').localeCompare(b.nomor || '');
         });
 
       const leaderboardSLTA = fullLeaderboard
         .filter(item => item.jenjang === 'SLTA')
         .sort((a, b) => {
-          if (a.catSummary.isComplete && b.catSummary.isComplete) {
+          if (a.catSummary.hasScored && b.catSummary.hasScored) {
             return (a.jenjangCatRank || 999) - (b.jenjangCatRank || 999);
           }
-          if (a.catSummary.isComplete) return -1;
-          if (b.catSummary.isComplete) return 1;
+          if (a.catSummary.hasScored) return -1;
+          if (b.catSummary.hasScored) return 1;
           return (a.nomor || '').localeCompare(b.nomor || '');
         });
 
@@ -3271,14 +3979,15 @@ export default function App() {
     const list = pesertaList.map(p => {
       const calc = calculateAllCategories(p, categories)!;
       // Ambil peringkat mandiri peserta ini di setiap kategori
-      const catRanks: Record<CategoryKey, { rank: number | null; jenjangRank: number | null; sum: number; isComplete: boolean }> = {} as any;
+      const catRanks: Record<CategoryKey, { rank: number | null; jenjangRank: number | null; sum: number; isComplete: boolean; hasScored: boolean }> = {} as any;
       categories.forEach(cat => {
         const catInfo = allCategoriesRankings[cat.key];
         const r = catInfo?.rankMap.get(p.id) || null;
         const jr = catInfo?.jenjangRankMap.get(p.id) || null;
         const sum = calc.categorySummaries[cat.key]?.sum || 0;
         const isComplete = calc.categorySummaries[cat.key]?.isComplete || false;
-        catRanks[cat.key] = { rank: r, jenjangRank: jr, sum, isComplete };
+        const hasScored = calc.categorySummaries[cat.key]?.hasScored || false;
+        catRanks[cat.key] = { rank: r, jenjangRank: jr, sum, isComplete, hasScored };
       });
 
       return {
@@ -3290,9 +3999,9 @@ export default function App() {
       };
     });
 
-    // Peringkat Juara Umum (Gabungan)
+    // Peringkat Juara Umum (Gabungan) — minimal 1 poin terisi sudah masuk peringkat
     const qualifiedList = list
-      .filter(item => item.calc.mandatoryCompleted)
+      .filter(item => item.calc.hasAnyScore)
       .sort((a, b) => b.calc.grandTotal - a.calc.grandTotal);
 
     let rankCounter = 1;
@@ -3336,7 +4045,7 @@ export default function App() {
     }));
 
     withRank.sort((a, b) => {
-      if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+      if (a.calc.hasAnyScore && b.calc.hasAnyScore) {
         if (jenjangFilter !== 'all') {
           return (a.jenjangRank || 999) - (b.jenjangRank || 999);
         }
@@ -3345,8 +4054,8 @@ export default function App() {
         }
         return (a.jenjangRank || 999) - (b.jenjangRank || 999);
       }
-      if (a.calc.mandatoryCompleted) return -1;
-      if (b.calc.mandatoryCompleted) return 1;
+      if (a.calc.hasAnyScore) return -1;
+      if (b.calc.hasAnyScore) return 1;
       return (a.nomor || '').localeCompare(b.nomor || '');
     });
 
@@ -3402,7 +4111,7 @@ export default function App() {
     return items.map((item, index) => {
       const rowObj: Record<string, any> = {
         'No': index + 1,
-        'Peringkat Juara Umum': item.jenjangRank ? `Juara ${item.jenjangRank} ${jenjangLabel}` : 'Belum Lengkap',
+        'Peringkat Juara Umum': item.jenjangRank ? `Juara ${item.jenjangRank} ${jenjangLabel}` : 'Belum Dinilai',
         'No. Peserta': item.nomor,
         'Tingkat': item.jenjang || 'SLTP',
         'Nama Peleton': item.peleton || '-',
@@ -3421,8 +4130,10 @@ export default function App() {
       rowObj[`TOTAL NILAI AKHIR (Max ${item.calc.maxGrandTotal})`] = item.calc.grandTotal;
       rowObj['Pencapaian (%)'] = Number(item.calc.grandPct.toFixed(2));
       rowObj['Status Kelayakan Juara'] = item.calc.mandatoryCompleted
-        ? 'Memenuhi Syarat Juara (Lengkap)'
-        : `Belum Lengkap (${item.calc.completedCategoriesCount}/${item.calc.totalCategoriesCount} Selesai)`;
+        ? 'Lengkap (100%)'
+        : item.calc.hasAnyScore
+        ? `Proses (${item.calc.completedCategoriesCount}/${item.calc.totalCategoriesCount} Kat. • ${item.calc.totalScoredCriteria} Poin Terisi)`
+        : 'Belum Dinilai';
 
       return rowObj;
     });
@@ -3438,22 +4149,22 @@ export default function App() {
     const sltpItems = overallStandingsData
       .filter(item => (item.jenjang || 'SLTP') === 'SLTP')
       .sort((a, b) => {
-        if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+        if (a.calc.hasAnyScore && b.calc.hasAnyScore) {
           return (a.jenjangRank || 999) - (b.jenjangRank || 999);
         }
-        if (a.calc.mandatoryCompleted) return -1;
-        if (b.calc.mandatoryCompleted) return 1;
+        if (a.calc.hasAnyScore) return -1;
+        if (b.calc.hasAnyScore) return 1;
         return (a.nomor || '').localeCompare(b.nomor || '');
       });
 
     const sltaItems = overallStandingsData
       .filter(item => item.jenjang === 'SLTA')
       .sort((a, b) => {
-        if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+        if (a.calc.hasAnyScore && b.calc.hasAnyScore) {
           return (a.jenjangRank || 999) - (b.jenjangRank || 999);
         }
-        if (a.calc.mandatoryCompleted) return -1;
-        if (b.calc.mandatoryCompleted) return 1;
+        if (a.calc.hasAnyScore) return -1;
+        if (b.calc.hasAnyScore) return 1;
         return (a.nomor || '').localeCompare(b.nomor || '');
       });
 
@@ -3478,7 +4189,7 @@ export default function App() {
       const activeRank = item.jenjangCatRank;
       const rowObj: Record<string, any> = {
         'No': index + 1,
-        'Peringkat Kategori': activeRank ? `Juara ${activeRank} (${jenjangLabel})` : 'Belum Lengkap',
+        'Peringkat Kategori': activeRank ? `Juara ${activeRank} (${jenjangLabel})` : 'Belum Dinilai',
         'No. Peserta': item.nomor,
         'Tingkat': item.jenjang || 'SLTP',
         'Nama Peleton': item.peleton || '-',
@@ -3494,7 +4205,11 @@ export default function App() {
 
       rowObj[`TOTAL NILAI ${targetCat.shortTitle.toUpperCase()} (Max ${targetCat.maxPoints})`] = item.catSummary.sum;
       rowObj['Pencapaian (%)'] = Number(item.catSummary.pct.toFixed(2));
-      rowObj['Status Kategori'] = item.catSummary.isComplete ? 'Selesai Dinilai' : 'Belum Lengkap';
+      rowObj['Status Kategori'] = item.catSummary.isComplete
+        ? 'Lengkap'
+        : item.catSummary.hasScored
+        ? `Proses (${item.catSummary.count}/${item.catSummary.totalCriteria})`
+        : 'Belum Dinilai';
 
       return rowObj;
     });
@@ -3535,11 +4250,11 @@ export default function App() {
     const sltpOverall = overallStandingsData
       .filter(item => (item.jenjang || 'SLTP') === 'SLTP')
       .sort((a, b) => {
-        if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+        if (a.calc.hasAnyScore && b.calc.hasAnyScore) {
           return (a.jenjangRank || 999) - (b.jenjangRank || 999);
         }
-        if (a.calc.mandatoryCompleted) return -1;
-        if (b.calc.mandatoryCompleted) return 1;
+        if (a.calc.hasAnyScore) return -1;
+        if (b.calc.hasAnyScore) return 1;
         return (a.nomor || '').localeCompare(b.nomor || '');
       });
     const wsUmumSltp = XLSX.utils.json_to_sheet(buildJuaraUmumExcelRows(sltpOverall, 'SLTP'));
@@ -3549,11 +4264,11 @@ export default function App() {
     const sltaOverall = overallStandingsData
       .filter(item => item.jenjang === 'SLTA')
       .sort((a, b) => {
-        if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+        if (a.calc.hasAnyScore && b.calc.hasAnyScore) {
           return (a.jenjangRank || 999) - (b.jenjangRank || 999);
         }
-        if (a.calc.mandatoryCompleted) return -1;
-        if (b.calc.mandatoryCompleted) return 1;
+        if (a.calc.hasAnyScore) return -1;
+        if (b.calc.hasAnyScore) return 1;
         return (a.nomor || '').localeCompare(b.nomor || '');
       });
     const wsUmumSlta = XLSX.utils.json_to_sheet(buildJuaraUmumExcelRows(sltaOverall, 'SLTA'));
@@ -3840,12 +4555,12 @@ export default function App() {
 
   // 6. Unduh Daftar Nama Peserta & Sekolah Terdaftar (.xlsx)
   const handleExportDaftarPesertaExcel = (filterJenjang: 'all' | 'SLTP' | 'SLTA' = 'all') => {
-    if (pesertaList.length === 0) {
+    if (scopedPesertaList.length === 0) {
       showToast('Belum ada data peserta untuk diunduh!', 'error');
       return;
     }
 
-    const filtered = pesertaList.filter(p => {
+    const filtered = scopedPesertaList.filter(p => {
       if (filterJenjang === 'all') return true;
       return (p.jenjang || 'SLTP') === filterJenjang;
     });
@@ -3945,7 +4660,7 @@ export default function App() {
   // Selected participant for Print Modal
   const printTargetParticipant = useMemo(() => {
     if (!printPesertaId) return null;
-    const target = pesertaList.find(p => p.id === printPesertaId);
+    const target = scopedPesertaList.find(p => p.id === printPesertaId);
     if (!target) return null;
     const calc = calculateAllCategories(target, categories);
     const itemInTable = overallStandingsData.find(t => t.id === target.id);
@@ -3954,7 +4669,7 @@ export default function App() {
       calc,
       rank: itemInTable?.rank || null
     };
-  }, [printPesertaId, pesertaList, categories, overallStandingsData]);
+  }, [printPesertaId, scopedPesertaList, categories, overallStandingsData]);
 
   // Navigate between categories (Next / Prev)
   const currentCategoryIndex = useMemo(() => {
@@ -4392,9 +5107,15 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setModalCloudInfoOpen(true)}
-                title="Status Sinkronisasi Cloud Firestore Multi-Perangkat"
+                title={
+                  cloudQuotaExceeded
+                    ? 'Kuota tulis harian Cloud Firestore tercapai (disimpan lokal hingga esok hari)'
+                    : 'Status Sinkronisasi Cloud Firestore Multi-Perangkat'
+                }
                 className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer shrink-0 ${
-                  cloudStatus === 'connected'
+                  cloudQuotaExceeded
+                    ? 'bg-amber-950/80 border-amber-500/50 text-amber-300 hover:bg-amber-900/60'
+                    : cloudStatus === 'connected'
                     ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/60'
                     : cloudStatus === 'connecting'
                     ? 'bg-amber-950/70 border-amber-500/40 text-amber-300 animate-pulse'
@@ -4402,11 +5123,23 @@ export default function App() {
                 }`}
               >
                 <span className={`w-2 h-2 rounded-full shrink-0 ${
-                  cloudStatus === 'connected' ? 'bg-emerald-400 animate-pulse' : cloudStatus === 'connecting' ? 'bg-amber-400' : 'bg-rose-400'
+                  cloudQuotaExceeded
+                    ? 'bg-amber-400'
+                    : cloudStatus === 'connected'
+                    ? 'bg-emerald-400 animate-pulse'
+                    : cloudStatus === 'connecting'
+                    ? 'bg-amber-400'
+                    : 'bg-rose-400'
                 }`} />
                 <Cloud className="w-3.5 h-3.5 text-current shrink-0" />
                 <span className="hidden md:inline">
-                  {cloudStatus === 'connected' ? 'Cloud Aktif' : cloudStatus === 'connecting' ? 'Menghubungkan...' : 'Offline'}
+                  {cloudQuotaExceeded
+                    ? 'Kuota Penuh'
+                    : cloudStatus === 'connected'
+                    ? 'Cloud Aktif'
+                    : cloudStatus === 'connecting'
+                    ? 'Menghubungkan...'
+                    : 'Offline'}
                 </span>
               </button>
 
@@ -4442,12 +5175,14 @@ export default function App() {
                       ? 'JURI LAPANGAN'
                       : currentUser.role === 'sekolah'
                       ? (currentUser.schoolName ? `SEKOLAH: ${currentUser.schoolName}` : 'AKUN SEKOLAH')
+                      : currentUser.role === 'pembina_polres'
+                      ? 'PEMBINA POLRES'
                       : 'TAMU (READ-ONLY)'}
                   </span>
                 </div>
               </div>
 
-              {!isUserRole && (
+              {!isUserRole && !isPembinaPolresRole && (
                 <button
                   onClick={openNewPesertaModal}
                   className="bg-blue-600 hover:bg-blue-700 text-white px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow transition cursor-pointer shrink-0"
@@ -4482,10 +5217,19 @@ export default function App() {
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => handleSaveAppStatus({ ...appStatus, isActive: true })}
-              className="bg-white text-rose-700 hover:bg-rose-50 px-3 py-1 rounded-lg text-[11px] font-black uppercase transition cursor-pointer shadow-xs"
+              disabled={isActivatingApp}
+              onClick={async () => {
+                setIsActivatingApp(true);
+                try {
+                  await handleSaveAppStatus({ ...appStatus, isActive: true });
+                } finally {
+                  setIsActivatingApp(false);
+                }
+              }}
+              className="bg-white text-rose-700 hover:bg-rose-50 disabled:opacity-70 px-3 py-1 rounded-lg text-[11px] font-black uppercase transition cursor-pointer shadow-xs inline-flex items-center gap-1.5"
             >
-              Aktifkan Sekarang
+              {isActivatingApp && <Loader2 className="w-3 h-3 animate-spin" />}
+              <span>{isActivatingApp ? 'Mengaktifkan...' : 'Aktifkan Sekarang'}</span>
             </button>
             <button
               type="button"
@@ -4510,7 +5254,6 @@ export default function App() {
 
         {/* SIDEBAR NAVIGATION */}
         <aside
-          ref={sidebarNavRef}
           className={`no-print bg-slate-900 border-r border-slate-800 text-slate-200 transition-all duration-200 z-40 flex flex-col shrink-0 ${
             sidebarOpen
               ? 'fixed inset-y-0 left-0 w-72 sm:w-80 shadow-2xl flex h-full pt-0 z-50'
@@ -4538,7 +5281,6 @@ export default function App() {
               onClick={() => {
                 setCurrentTab('dashboard');
                 setSidebarOpen(false);
-                closeAllSidebarDropdowns();
               }}
               className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
                 currentTab === 'dashboard'
@@ -4555,8 +5297,11 @@ export default function App() {
             {/* ---------------------------------------------------- */}
             {/* DROPDOWN 1: PILIHAN KATEGORI PENILAIAN */}
             {/* ---------------------------------------------------- */}
+            {!isPembinaPolresRole && !isSekolahAccount && (
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
+                type="button"
+                aria-expanded={!sidebarCollapsed && sidebarCatDropdownOpen}
                 onClick={() => toggleSidebarDropdown('cat')}
                 className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
               >
@@ -4602,7 +5347,6 @@ export default function App() {
                             onClick={() => {
                               setCurrentTab(cat.key);
                               setSidebarOpen(false);
-                              closeAllSidebarDropdowns();
                             }}
                             className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer ${
                               isCurrent
@@ -4629,12 +5373,15 @@ export default function App() {
                 </div>
               )}
             </div>
+            )}
 
             {/* ---------------------------------------------------- */}
             {/* DROPDOWN 2: NAMA SEKOLAH & PANGKALAN KONTINGEN */}
             {/* ---------------------------------------------------- */}
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
+                type="button"
+                aria-expanded={!sidebarCollapsed && sidebarPesertaDropdownOpen}
                 onClick={() => toggleSidebarDropdown('peserta')}
                 className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
               >
@@ -4652,7 +5399,7 @@ export default function App() {
                 {!sidebarCollapsed && (
                   <div className="flex items-center gap-1.5 shrink-0">
                     <span className="text-[10px] font-bold bg-slate-800 text-emerald-300 px-1.5 py-0.5 rounded">
-                      {pesertaList.length}
+                      {scopedPesertaList.length}
                     </span>
                     {sidebarPesertaDropdownOpen ? (
                       <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
@@ -4718,7 +5465,6 @@ export default function App() {
                             onClick={() => {
                               setActivePesertaId(p.id);
                               setSidebarOpen(false);
-                              closeAllSidebarDropdowns();
                             }}
                             className={`w-full text-left p-2 rounded-lg text-xs transition cursor-pointer flex items-center justify-between gap-2 border ${
                               isCurrentActive
@@ -4755,11 +5501,10 @@ export default function App() {
 
                   {/* Actions inside Peserta dropdown */}
                   <div className="pt-2 border-t border-slate-800 space-y-1.5">
-                    {!isUserRole && (
+                    {!isUserRole && !isPembinaPolresRole && (
                       <button
                         onClick={() => {
                           openNewPesertaModal();
-                          closeAllSidebarDropdowns();
                         }}
                         className="w-full bg-blue-600 hover:bg-blue-700 text-white py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
                       >
@@ -4769,7 +5514,6 @@ export default function App() {
                     <button
                       onClick={() => {
                         handleExportDaftarPesertaExcel('all');
-                        closeAllSidebarDropdowns();
                       }}
                       className="w-full bg-emerald-950/60 hover:bg-emerald-900 border border-emerald-700/60 text-emerald-200 py-1.5 px-2.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
@@ -4778,7 +5522,6 @@ export default function App() {
                     <button
                       onClick={() => {
                         setModalDaftarPesertaOpen(true);
-                        closeAllSidebarDropdowns();
                       }}
                       className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 py-1.5 px-2.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
@@ -4792,8 +5535,11 @@ export default function App() {
             {/* ---------------------------------------------------- */}
             {/* DROPDOWN 3: REKAPITULASI & PERINGKAT */}
             {/* ---------------------------------------------------- */}
+            {!isSekolahAccount && (
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
+                type="button"
+                aria-expanded={!sidebarCollapsed && sidebarRekapDropdownOpen}
                 onClick={() => toggleSidebarDropdown('rekap')}
                 className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
               >
@@ -4836,7 +5582,6 @@ export default function App() {
                           setCurrentTab('rekap');
                           setRekapViewMode('umum');
                           setSidebarOpen(false);
-                          closeAllSidebarDropdowns();
                         }}
                         className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                           currentTab === 'rekap' && rekapViewMode === 'umum'
@@ -4853,7 +5598,6 @@ export default function App() {
                           setCurrentTab('rekap');
                           setRekapViewMode('kategori');
                           setSidebarOpen(false);
-                          closeAllSidebarDropdowns();
                         }}
                         className={`w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                           currentTab === 'rekap' && rekapViewMode === 'kategori'
@@ -4874,7 +5618,6 @@ export default function App() {
                               key={c.key}
                               onClick={() => {
                                 setRekapSelectedCategoryKey(c.key);
-                                closeAllSidebarDropdowns();
                               }}
                               className={`w-full text-left px-2 py-1 rounded text-[11px] truncate transition cursor-pointer ${
                                 rekapSelectedCategoryKey === c.key
@@ -4893,7 +5636,6 @@ export default function App() {
                           setCurrentTab('rekap');
                           setRekapViewMode('ringkasan');
                           setSidebarOpen(false);
-                          closeAllSidebarDropdowns();
                         }}
                         className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                           currentTab === 'rekap' && rekapViewMode === 'ringkasan'
@@ -4908,7 +5650,6 @@ export default function App() {
                       <button
                         onClick={() => {
                           handleExportExcelMasterWorkbook();
-                          closeAllSidebarDropdowns();
                         }}
                         className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-emerald-300 hover:bg-emerald-950/40 hover:text-emerald-200 border border-emerald-700/40 transition cursor-pointer font-bold mt-1"
                       >
@@ -4920,12 +5661,16 @@ export default function App() {
                 </div>
               )}
             </div>
+            )}
 
             {/* ---------------------------------------------------- */}
             {/* DROPDOWN 4: FORMULIR PENDAFTARAN RESMI PKS */}
             {/* ---------------------------------------------------- */}
+            {!isPembinaPolresRole && (
             <div className="bg-slate-950/40 rounded-xl border border-slate-800/80 overflow-hidden">
               <button
+                type="button"
+                aria-expanded={!sidebarCollapsed && sidebarFormDropdownOpen}
                 onClick={() => toggleSidebarDropdown('form')}
                 className="w-full flex items-center justify-between p-2.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition cursor-pointer"
               >
@@ -4960,7 +5705,6 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('form_polisi_pelajar');
                       setSidebarOpen(false);
-                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                       currentTab === 'form_polisi_pelajar'
@@ -4976,7 +5720,6 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('form_calon_pks');
                       setSidebarOpen(false);
-                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                       currentTab === 'form_calon_pks'
@@ -4992,7 +5735,6 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('form_perkemahan_balok1');
                       setSidebarOpen(false);
-                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                       currentTab === 'form_perkemahan_balok1'
@@ -5008,7 +5750,6 @@ export default function App() {
                     onClick={() => {
                       setCurrentTab('form_perkemahan_balok2');
                       setSidebarOpen(false);
-                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition cursor-pointer ${
                       currentTab === 'form_perkemahan_balok2'
@@ -5022,6 +5763,7 @@ export default function App() {
                 </div>
               )}
             </div>
+            )}
 
             {/* ---------------------------------------------------- */}
             {/* MENU MANDIRI: NAMA-NAMA ANGGOTA PKS (DIREKTORI SISWA) */}
@@ -5031,7 +5773,6 @@ export default function App() {
                 onClick={() => {
                   setCurrentTab('anggota_pks');
                   setSidebarOpen(false);
-                  closeAllSidebarDropdowns();
                 }}
                 className={`w-full flex items-center justify-between p-2.5 text-xs font-bold transition cursor-pointer ${
                   currentTab === 'anggota_pks'
@@ -5056,7 +5797,7 @@ export default function App() {
                   <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                     currentTab === 'anggota_pks' ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-emerald-300'
                   }`}>
-                    {registrationsList.length}
+                    {scopedRegistrationsList.length}
                   </span>
                 )}
               </button>
@@ -5064,50 +5805,52 @@ export default function App() {
 
             {/* Menu Alat & Master Blanko Juri */}
             <div className="pt-2 border-t border-slate-800 space-y-1">
-              <button
-                onClick={() => {
-                  setBlankSheetCatKey('pbb');
-                  setModalBlankSheetOpen(true);
-                  closeAllSidebarDropdowns();
-                }}
-                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
-              >
-                <Printer className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                {!sidebarCollapsed && <span className="truncate">Format Blanko Juri Penilaian</span>}
-              </button>
+              {!isPembinaPolresRole && !isSekolahAccount && (
+                <button
+                  onClick={() => {
+                    setBlankSheetCatKey('pbb');
+                    setModalBlankSheetOpen(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  {!sidebarCollapsed && <span className="truncate">Format Blanko Juri Penilaian</span>}
+                </button>
+              )}
+
+              {/* Menu Rekap Pendaftaran Sekolah (Dapat diakses Admin, Super Admin, dan Pembina Polres) */}
+              {(isAdminRole || isPembinaPolresRole) && (
+                <button
+                  onClick={() => {
+                    setCurrentTab('rekap_pendaftaran');
+                    setSidebarOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer font-bold ${
+                    currentTab === 'rekap_pendaftaran'
+                      ? 'bg-blue-600 text-white shadow'
+                      : 'text-blue-400 hover:text-blue-300 hover:bg-slate-800'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    {!sidebarCollapsed && <span className="truncate">Rekap Pendaftaran Sekolah</span>}
+                  </div>
+                  {!sidebarCollapsed && registrationsList.length > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-blue-500/30 text-blue-200">
+                      {registrationsList.length}
+                    </span>
+                  )}
+                </button>
+              )}
 
               {/* Menu Operasional Admin (Dapat diakses Super Admin & Admin Panitia) */}
               {isAdminRole && (
                 <>
                   <button
                     onClick={() => {
-                      setCurrentTab('rekap_pendaftaran');
-                      setSidebarOpen(false);
-                      closeAllSidebarDropdowns();
-                    }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer font-bold ${
-                      currentTab === 'rekap_pendaftaran'
-                        ? 'bg-blue-600 text-white shadow'
-                        : 'text-blue-400 hover:text-blue-300 hover:bg-slate-800'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                      {!sidebarCollapsed && <span className="truncate">Rekap Pendaftaran Sekolah</span>}
-                    </div>
-                    {!sidebarCollapsed && registrationsList.length > 0 && (
-                      <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-blue-500/30 text-blue-200">
-                        {registrationsList.length}
-                      </span>
-                    )}
-                  </button>
-
-                  <button
-                    onClick={() => {
                       setPreselectedLogUsername('__ALL__');
                       setCurrentTab('log_aktivitas');
                       setSidebarOpen(false);
-                      closeAllSidebarDropdowns();
                     }}
                     className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition cursor-pointer font-bold ${
                       currentTab === 'log_aktivitas'
@@ -5129,7 +5872,6 @@ export default function App() {
                   <button
                     onClick={() => {
                       setModalPaymentSettingsOpen(true);
-                      closeAllSidebarDropdowns();
                     }}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-amber-400 hover:text-amber-300 hover:bg-slate-800 transition cursor-pointer font-bold"
                   >
@@ -5140,7 +5882,6 @@ export default function App() {
                   <button
                     onClick={() => {
                       setModalBlankoEditorOpen(true);
-                      closeAllSidebarDropdowns();
                     }}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-indigo-400 hover:text-indigo-300 hover:bg-slate-800 transition cursor-pointer font-bold"
                   >
@@ -5151,7 +5892,6 @@ export default function App() {
                   <button
                     onClick={() => {
                       setModalSchoolAccountsOpen(true);
-                      closeAllSidebarDropdowns();
                     }}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-emerald-400 hover:text-emerald-300 hover:bg-slate-800 transition cursor-pointer font-bold"
                   >
@@ -5163,7 +5903,6 @@ export default function App() {
                     onClick={() => {
                       setUserFormTab('list');
                       setModalUserOpen(true);
-                      closeAllSidebarDropdowns();
                     }}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
                   >
@@ -5293,35 +6032,91 @@ export default function App() {
             </div>
           )}
 
-          {/* Context sub-bar for Active Participant & Quick Details */}
-          {activePeserta && (
-            <div className="bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 py-2.5 shadow-2xs no-print flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex items-center gap-4 text-slate-500">
-                <span className="flex items-center gap-1">
-                  <Calendar className="w-3.5 h-3.5 text-blue-600" /> {activePeserta.tanggal}
-                </span>
-                <span className="flex items-center gap-1">
-                  <UserCheck className="w-3.5 h-3.5 text-blue-600" /> Juri: {activePeserta.juri}
-                </span>
-                <span className="text-slate-300">|</span>
-                <button
-                  onClick={() => setModalDaftarPesertaOpen(true)}
-                  className="font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
-                >
-                  <Users className="w-3.5 h-3.5" /> Semua Peserta
-                </button>
-                <button
-                  onClick={() => handleExportDaftarPesertaExcel('all')}
-                  className="font-bold text-emerald-600 hover:text-emerald-800 flex items-center gap-1 cursor-pointer"
-                >
-                  <Download className="w-3.5 h-3.5" /> Unduh Excel
-                </button>
-              </div>
+          {/* Restricted Access Notice for Pembina Polres Role */}
+          {isPembinaPolresRole && (
+            <div className="bg-cyan-700 text-white font-semibold px-4 py-2 text-xs text-center border-b border-cyan-800 no-print flex items-center justify-center gap-2">
+              <Shield className="w-3.5 h-3.5 shrink-0 text-cyan-200" /> Pembina Polres: Akses khusus Dashboard Ringkasan, Nama Sekolah, Nama-Nama Anggota PKS, Rekapitulasi, dan Rekap Pendaftaran Sekolah.
             </div>
           )}
 
+          {/* Top Sub-bar: Live Date & Time */}
+          <div className="bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 py-2.5 shadow-2xs no-print flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-4 text-slate-600 font-semibold">
+              <span className="flex items-center gap-1.5">
+                <Calendar className="w-3.5 h-3.5 text-blue-600" />
+                {new Intl.DateTimeFormat('id-ID', {
+                  weekday: 'long',
+                  day: '2-digit',
+                  month: 'long',
+                  year: 'numeric'
+                }).format(dashboardNow)}
+              </span>
+              <span className="text-slate-300">|</span>
+              <span className="flex items-center gap-1.5 font-mono tabular-nums text-slate-800 font-bold">
+                <Clock className="w-3.5 h-3.5 text-blue-600" />
+                {formatDashboardTimeHms(dashboardNow)}
+              </span>
+            </div>
+          </div>
+
           {/* 3. MAIN CONTENT CONTAINER */}
           <main className={`max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full ${(modalPrintOpen || modalBlankSheetOpen || modalDaftarPesertaOpen) ? 'no-print' : ''}`}>
+            {cloudQuotaExceeded && !quotaBannerDismissed && (
+              <div
+                role="alert"
+                className="mb-4 no-print rounded-xl border border-amber-300 bg-amber-50 p-3.5 text-amber-950 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+              >
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <div className="p-2 rounded-lg bg-amber-100 text-amber-700 shrink-0 mt-0.5">
+                    <AlertTriangle className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <div className="text-xs font-bold text-amber-950">
+                      Kuota Tulis Harian Cloud Firestore Tercapai — Mode Penyimpanan Lokal Aktif
+                    </div>
+                    <p className="text-xs text-amber-900 leading-relaxed">
+                      Batas harian unit tulis gratis database telah terpenuhi. Penulisan ke Cloud dijeda otomatis untuk menghentikan percobaan ulang berlebih dan akan direset otomatis pada keesokan harinya. Input nilai dan perubahan tetap disimpan di perangkat ini (localStorage). Informasi batas paket <strong>Spark</strong> dan bagian <strong>Enterprise edition</strong> dapat dilihat pada{' '}
+                      <a
+                        href="https://firebase.google.com/pricing#cloud-firestore"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-bold underline inline-flex items-center gap-0.5 text-amber-950 hover:text-amber-700"
+                      >
+                        Firebase Pricing (Cloud Firestore)
+                        <ExternalLink className="w-3 h-3 inline" />
+                      </a>
+                      .
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0 self-end lg:self-center">
+                  <button
+                    type="button"
+                    onClick={() => setModalCloudInfoOpen(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap"
+                  >
+                    <Cloud className="w-3.5 h-3.5" />
+                    <span>Detail Cloud</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuotaBannerDismissed(true)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-amber-300 bg-white hover:bg-amber-100 text-amber-900 text-xs font-semibold transition cursor-pointer whitespace-nowrap"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Tutup</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!activeCategory && (
+              <NetworkErrorBanner
+                error={workspaceErrorBanner}
+                onDismiss={() => setWorkspaceErrorBanner(null)}
+                className="mb-4 no-print"
+              />
+            )}
 
         {/* ==================================================== */}
         {/* TAB 1: DASHBOARD DENGAN SAMBUTAN PENGGUNA & CHART PROGRES PENILAIAN */}
@@ -5347,6 +6142,8 @@ export default function App() {
                         ? 'Juri Lapangan'
                         : currentUser.role === 'sekolah'
                         ? 'Perwakilan Resmi Sekolah'
+                        : currentUser.role === 'pembina_polres'
+                        ? 'Pembina Polres'
                         : 'Akun Tamu / Peninjau'}
                     </span>
                     <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 px-2.5 py-1 rounded-full text-xs font-semibold">
@@ -5751,7 +6548,7 @@ export default function App() {
                   >
                     <Download className="w-3.5 h-3.5" /> Unduh Daftar Excel
                   </button>
-                  {!isUserRole && (
+                  {!isUserRole && !isPembinaPolresRole && (
                     <button
                       onClick={openNewPesertaModal}
                       className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
@@ -5864,18 +6661,20 @@ export default function App() {
 
                             <td className="py-3 px-4 text-right">
                               <div className="flex items-center justify-end gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setActivePesertaId(p.id);
-                                    setCurrentTab('pbb');
-                                  }}
-                                  className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold rounded-lg text-[11px] transition cursor-pointer"
-                                  title="Buka form penilaian untuk peserta ini"
-                                >
-                                  Nilai
-                                </button>
-                                {!isUserRole && (
+                                {!isPembinaPolresRole && !isSekolahAccount && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setActivePesertaId(p.id);
+                                      setCurrentTab('pbb');
+                                    }}
+                                    className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold rounded-lg text-[11px] transition cursor-pointer"
+                                    title="Buka form penilaian untuk peserta ini"
+                                  >
+                                    Nilai
+                                  </button>
+                                )}
+                                {!isUserRole && !isPembinaPolresRole && (
                                   <button
                                     type="button"
                                     onClick={() => openEditPesertaModal(p)}
@@ -5883,6 +6682,19 @@ export default function App() {
                                     title="Edit data sekolah/peserta"
                                   >
                                     <Edit className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                {(isPembinaPolresRole || isSekolahAccount) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setPrintPesertaId(p.id);
+                                      setModalPrintOpen(true);
+                                    }}
+                                    className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg text-[11px] transition cursor-pointer inline-flex items-center gap-1"
+                                    title="Lihat ringkasan nilai peserta"
+                                  >
+                                    <Eye className="w-3 h-3" /> Detail
                                   </button>
                                 )}
                               </div>
@@ -5966,6 +6778,7 @@ export default function App() {
                         { id: 'admin', label: 'Admin' },
                         { id: 'juri', label: 'Juri' },
                         { id: 'sekolah', label: 'Sekolah' },
+                        { id: 'pembina_polres', label: 'Pembina Polres' },
                         { id: 'user', label: 'Tamu' }
                       ] as const
                     ).map(item => (
@@ -6015,6 +6828,8 @@ export default function App() {
                               ? 'Juri Lapangan'
                               : acc.role === 'sekolah'
                               ? 'Perwakilan Sekolah'
+                              : acc.role === 'pembina_polres'
+                              ? 'Pembina Polres'
                               : 'Tamu';
 
                           return (
@@ -6127,7 +6942,7 @@ export default function App() {
         {/* ==================================================== */}
         {/* TAB DINAMIS: LEMBAR PENILAIAN DENGAN DROPDOWN */}
         {/* ==================================================== */}
-        {activeCategory && (
+        {activeCategory && !isPembinaPolresRole && !isSekolahAccount && (
           <div className="space-y-4">
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-200 pb-4 mb-4">
@@ -6153,17 +6968,37 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-4">
-                  <div className="text-right">
-                    <span className="text-xs text-slate-400 block font-semibold uppercase">Subtotal Diperoleh:</span>
-                    <div className="text-2xl font-black text-blue-700 tabular-nums">
-                      {activeCalc?.categorySummaries[activeCategory.key]?.sum || 0}{' '}
-                      <span className="text-slate-400 text-sm font-semibold">
-                        / {activeCategory.maxPoints}
+                  <div className="text-right space-y-1">
+                    {saveSyncStatus === 'saving' && (
+                      <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-[11px] font-bold text-blue-700">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        <span>Menyimpan ke Cloud...</span>
+                      </div>
+                    )}
+                    {saveSyncStatus === 'saved' && (
+                      <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[11px] font-bold text-emerald-700">
+                        <CheckCircle2 className="w-3 h-3" />
+                        <span>Tersimpan ke Cloud</span>
+                      </div>
+                    )}
+                    {saveSyncStatus === 'error' && (
+                      <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-rose-50 border border-rose-300 text-[11px] font-bold text-rose-700">
+                        <WifiOff className="w-3 h-3" />
+                        <span>Gagal tersimpan</span>
+                      </div>
+                    )}
+                    <div>
+                      <span className="text-xs text-slate-400 block font-semibold uppercase">Subtotal Diperoleh:</span>
+                      <div className="text-2xl font-black text-blue-700 tabular-nums">
+                        {activeCalc?.categorySummaries[activeCategory.key]?.sum || 0}{' '}
+                        <span className="text-slate-400 text-sm font-semibold">
+                          / {activeCategory.maxPoints}
+                        </span>
+                      </div>
+                      <span className="text-xs font-bold text-blue-600 tabular-nums">
+                        ({(activeCalc?.categorySummaries[activeCategory.key]?.pct || 0).toFixed(2)}%)
                       </span>
                     </div>
-                    <span className="text-xs font-bold text-blue-600">
-                      ({(activeCalc?.categorySummaries[activeCategory.key]?.pct || 0).toFixed(2)}%)
-                    </span>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
@@ -6207,6 +7042,7 @@ export default function App() {
                       <>
                         <button
                           onClick={() => {
+                            setModalErrorBanner(null);
                             setScanPreviewUrl(null);
                             setScanFileName('');
                             setScanError(null);
@@ -6245,6 +7081,199 @@ export default function App() {
                   </span>
                 </div>
               )}
+
+              {/* Panel Pencarian Sekolah Langsung untuk Berpindah Peserta yang Dinilai */}
+              <div className="mb-3 bg-blue-50/60 border border-blue-200 rounded-xl p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div className="flex items-center justify-between sm:justify-start gap-3 min-w-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-lg bg-blue-600 text-white flex items-center justify-center font-black text-xs shrink-0 tabular-nums">
+                      {activePeserta ? activePeserta.nomor : '--'}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700">
+                          Sekolah Sedang Dinilai
+                        </span>
+                        {activePeserta && (
+                          <span
+                            className={`text-[10px] font-black px-1.5 py-0.2 rounded ${
+                              activePeserta.jenjang === 'SLTA'
+                                ? 'bg-indigo-100 text-indigo-800'
+                                : 'bg-blue-100 text-blue-800'
+                            }`}
+                          >
+                            {activePeserta.jenjang || 'SLTP'}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm font-black text-slate-900 truncate">
+                        {activePeserta ? activePeserta.sekolah : 'Belum ada peserta'}
+                        {activePeserta?.peleton ? (
+                          <span className="text-xs font-semibold text-slate-500 ml-1.5">
+                            ({activePeserta.peleton})
+                          </span>
+                        ) : null}
+                      </p>
+                      {activePeserta && (
+                        <p className="text-[11px] text-slate-500 font-semibold tabular-nums">
+                          Terisi {Object.keys(activePeserta.scores?.[activeCategory.key] || {}).length} dari{' '}
+                          {activeCategory.criteria.length} butir · Subtotal{' '}
+                          <span className="text-blue-700 font-bold">
+                            {activeCalc?.categorySummaries[activeCategory.key]?.sum || 0} pt
+                          </span>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handlePrevPeserta}
+                      disabled={scopedPesertaList.length <= 1}
+                      title="Sekolah Sebelumnya"
+                      className="p-1.5 rounded-lg border border-blue-200 bg-white text-slate-700 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleNextPeserta}
+                      disabled={scopedPesertaList.length <= 1}
+                      title="Sekolah Berikutnya"
+                      className="p-1.5 rounded-lg border border-blue-200 bg-white text-slate-700 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Kotak Cari Langsung Sekolah */}
+                <div ref={criteriaSchoolSearchRef} className="relative w-full lg:w-96 shrink-0">
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-blue-600 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={criteriaSchoolSearch}
+                      onFocus={() => setCriteriaSchoolDropdownOpen(true)}
+                      onChange={e => {
+                        setCriteriaSchoolSearch(e.target.value);
+                        setCriteriaSchoolDropdownOpen(true);
+                      }}
+                      placeholder="Cari nama sekolah, nomor peserta, atau peleton..."
+                      className="w-full pl-9 pr-8 py-2 text-xs font-semibold text-slate-900 bg-white border border-blue-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none shadow-2xs"
+                    />
+                    {criteriaSchoolSearch ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCriteriaSchoolSearch('');
+                          setCriteriaSchoolDropdownOpen(true);
+                        }}
+                        title="Hapus pencarian"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    )}
+                  </div>
+
+                  {criteriaSchoolDropdownOpen && (
+                    <div className="absolute left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-72 overflow-y-auto divide-y divide-slate-100">
+                      {(() => {
+                        const q = criteriaSchoolSearch.trim().toLowerCase();
+                        const matched = scopedPesertaList.filter(p => {
+                          if (!q) return true;
+                          return (
+                            p.sekolah.toLowerCase().includes(q) ||
+                            p.nomor.toLowerCase().includes(q) ||
+                            (p.peleton && p.peleton.toLowerCase().includes(q)) ||
+                            (p.jenjang && p.jenjang.toLowerCase().includes(q))
+                          );
+                        });
+
+                        if (matched.length === 0) {
+                          return (
+                            <div className="p-4 text-center text-xs text-slate-500">
+                              <Search className="w-5 h-5 mx-auto mb-1 text-slate-300" />
+                              <p className="font-bold text-slate-600">Sekolah tidak ditemukan</p>
+                              <p className="text-[11px] text-slate-400">
+                                Tidak ada peserta yang cocok dengan "{criteriaSchoolSearch}".
+                              </p>
+                            </div>
+                          );
+                        }
+
+                        return matched.map(p => {
+                          const catScoresObj = p.scores?.[activeCategory.key] || {};
+                          const scoredCount = Object.keys(catScoresObj).length;
+                          const catSum = Object.values(catScoresObj).reduce<number>(
+                            (acc, val) => acc + (typeof val === 'number' ? val : 0),
+                            0
+                          );
+                          const isSelected = p.id === activePeserta?.id;
+
+                          return (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => {
+                                setActivePesertaId(p.id);
+                                setCriteriaSchoolSearch('');
+                                setCriteriaSchoolDropdownOpen(false);
+                              }}
+                              className={`w-full text-left px-3 py-2.5 text-xs flex items-center justify-between gap-2 transition cursor-pointer ${
+                                isSelected
+                                  ? 'bg-blue-50 text-blue-950 font-bold'
+                                  : 'hover:bg-slate-50 text-slate-800'
+                              }`}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-mono font-bold text-slate-600 tabular-nums">
+                                    No. {p.nomor}
+                                  </span>
+                                  <span
+                                    className={`text-[10px] font-extrabold px-1.5 py-0.2 rounded ${
+                                      p.jenjang === 'SLTA'
+                                        ? 'bg-indigo-100 text-indigo-800'
+                                        : 'bg-blue-100 text-blue-800'
+                                    }`}
+                                  >
+                                    {p.jenjang || 'SLTP'}
+                                  </span>
+                                  {isSelected && (
+                                    <span className="text-[10px] font-bold text-blue-700">
+                                      • Aktif
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="font-bold text-slate-900 truncate mt-0.5">
+                                  {p.sekolah}
+                                </div>
+                                {p.peleton && (
+                                  <div className="text-[11px] text-slate-500 truncate">
+                                    {p.peleton}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="text-right shrink-0 tabular-nums">
+                                <span className="block font-black text-blue-700">{catSum} pt</span>
+                                <span className="text-[10px] text-slate-500">
+                                  {scoredCount}/{activeCategory.criteria.length} butir
+                                </span>
+                              </div>
+                            </button>
+                          );
+                        });
+                      })()}
+                    </div>
+                  )}
+                </div>
+              </div>
 
               {/* Toolbar Dropdown Kategori & Filter Kriteria */}
               <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
@@ -6300,6 +7329,12 @@ export default function App() {
               </div>
             </div>
 
+            <NetworkErrorBanner
+              error={workspaceErrorBanner}
+              onDismiss={() => setWorkspaceErrorBanner(null)}
+              className="no-print"
+            />
+
             {/* Assessment Table with Dropdown Selectors & Radio Buttons */}
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
               <div className="overflow-x-auto">
@@ -6348,6 +7383,8 @@ export default function App() {
                         const secStats = c.section ? sectionTotals[c.section] : null;
                         const selectedVal = activePeserta?.scores?.[activeCategory.key]?.[c.no];
                         const isScored = selectedVal !== undefined && selectedVal !== null;
+                        const rowKey = activePeserta ? `${activePeserta.id}:${activeCategory.key}:${c.no}` : '';
+                        const isRowSaving = Boolean(rowKey && savingCriterionKeys[rowKey]);
 
                         return (
                           <React.Fragment key={c.no}>
@@ -6380,13 +7417,13 @@ export default function App() {
 
                               <td className="py-2.5 px-3 text-center bg-slate-50/70">
                                 <select
-                                  disabled={isUserRole}
+                                  disabled={isUserRole || isRowSaving}
                                   value={isScored ? String(selectedVal) : ''}
                                   onChange={e => {
                                     const val = e.target.value === '' ? null : Number(e.target.value);
-                                    handleScoreSelect(activeCategory.key, c.no, val);
+                                    void handleScoreSelect(activeCategory.key, c.no, val);
                                   }}
-                                  className={`w-full py-1.5 px-2 rounded-lg text-xs font-bold border transition outline-none cursor-pointer ${
+                                  className={`w-full py-1.5 px-2 rounded-lg text-xs font-bold border transition outline-none cursor-pointer disabled:opacity-60 ${
                                     isScored
                                       ? 'bg-blue-50 text-blue-800 border-blue-400'
                                       : 'bg-white text-slate-500 border-slate-300'
@@ -6405,14 +7442,14 @@ export default function App() {
                                 const isChecked = selectedVal === val;
                                 return (
                                   <td key={wIdx} className="py-2.5 px-1.5 text-center">
-                                    <label className={`block ${isUserRole ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}>
+                                    <label className={`block ${isUserRole || isRowSaving ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}>
                                       <input
                                         type="radio"
                                         name={`${activeCategory.key}_${c.no}`}
                                         value={val}
-                                        disabled={isUserRole}
+                                        disabled={isUserRole || isRowSaving}
                                         checked={isChecked}
-                                        onChange={() => handleScoreSelect(activeCategory.key, c.no, val)}
+                                        onChange={() => void handleScoreSelect(activeCategory.key, c.no, val)}
                                         className="hidden"
                                       />
                                       <span
@@ -6430,7 +7467,13 @@ export default function App() {
                               })}
 
                               <td className="py-2.5 px-4 text-center font-black text-blue-700 bg-slate-50 text-base tabular-nums">
-                                {isScored ? selectedVal : '-'}
+                                {isRowSaving ? (
+                                  <Loader2 className="w-4 h-4 animate-spin text-blue-600 mx-auto" />
+                                ) : isScored ? (
+                                  selectedVal
+                                ) : (
+                                  '-'
+                                )}
                               </td>
                             </tr>
                           </React.Fragment>
@@ -6457,7 +7500,7 @@ export default function App() {
         {/* ==================================================== */}
         {/* TAB 3: REKAPITULASI (JUARA UMUM & PER KATEGORI LOMBA) */}
         {/* ==================================================== */}
-        {currentTab === 'rekap' && (
+        {currentTab === 'rekap' && !isSekolahAccount && (
           <div className="space-y-5">
             {/* TINGKAT SELEKTOR (SLTP VS SLTA) - PERSISTENT TAB BAR */}
             <div className="bg-slate-900 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-md no-print border border-slate-800">
@@ -6700,17 +7743,17 @@ export default function App() {
                   const sltpItems = overallStandingsData
                     .filter(item => (item.jenjang || 'SLTP') === 'SLTP')
                     .sort((a, b) => {
-                      if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+                      if (a.calc.hasAnyScore && b.calc.hasAnyScore) {
                         return (a.jenjangRank || 999) - (b.jenjangRank || 999);
                       }
-                      if (a.calc.mandatoryCompleted) return -1;
-                      if (b.calc.mandatoryCompleted) return 1;
+                      if (a.calc.hasAnyScore) return -1;
+                      if (b.calc.hasAnyScore) return 1;
                       return (a.nomor || '').localeCompare(b.nomor || '');
                     });
 
-                  const j1 = sltpItems.find(t => t.jenjangRank === 1 && t.calc.mandatoryCompleted);
-                  const j2 = sltpItems.find(t => t.jenjangRank === 2 && t.calc.mandatoryCompleted);
-                  const j3 = sltpItems.find(t => t.jenjangRank === 3 && t.calc.mandatoryCompleted);
+                  const j1 = sltpItems.find(t => t.jenjangRank === 1 && t.calc.hasAnyScore);
+                  const j2 = sltpItems.find(t => t.jenjangRank === 2 && t.calc.hasAnyScore);
+                  const j3 = sltpItems.find(t => t.jenjangRank === 3 && t.calc.hasAnyScore);
 
                   return (
                     <div className="bg-white rounded-2xl shadow-md border-2 border-blue-200 overflow-hidden">
@@ -6773,7 +7816,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
 
@@ -6797,7 +7840,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
 
@@ -6821,7 +7864,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
                         </div>
@@ -6872,7 +7915,7 @@ export default function App() {
                                 let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
                                 let rowHighlight = '';
 
-                                if (item.calc.mandatoryCompleted && displayRank !== null) {
+                                if (item.calc.hasAnyScore && displayRank !== null) {
                                   if (displayRank === 1) {
                                     rankBadge = (
                                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-xs">
@@ -6906,9 +7949,13 @@ export default function App() {
                                   <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
                                     Lengkap
                                   </span>
+                                ) : item.calc.hasAnyScore ? (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800 whitespace-nowrap">
+                                    Proses ({item.calc.completedCategoriesCount}/{item.calc.totalCategoriesCount} Kat.)
+                                  </span>
                                 ) : (
-                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
-                                    Proses ({item.calc.completedCategoriesCount}/{item.calc.totalCategoriesCount})
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-slate-100 text-slate-500">
+                                    Belum Dinilai
                                   </span>
                                 );
 
@@ -6929,11 +7976,11 @@ export default function App() {
                                     {/* Kolom Tiap Mata Lomba (Peringkat SLTP Mandiri) */}
                                     {categories.map(cat => {
                                       const s = item.calc.categorySummaries[cat.key]?.sum || 0;
-                                      const isDone = item.calc.categorySummaries[cat.key]?.isComplete;
+                                      const hasCatScored = item.calc.categorySummaries[cat.key]?.hasScored;
                                       const cRank = item.catRanks[cat.key]?.jenjangRank;
 
                                       let rankPill = null;
-                                      if (isDone && cRank !== null && cRank !== undefined) {
+                                      if (hasCatScored && cRank !== null && cRank !== undefined) {
                                         if (cRank === 1) {
                                           rankPill = (
                                             <span className="block text-[9px] font-black text-amber-900 bg-amber-200/90 rounded px-1 py-0.2 mt-0.5">
@@ -6996,7 +8043,7 @@ export default function App() {
                                         >
                                           <Printer className="w-4 h-4" />
                                         </button>
-                                        {!isUserRole && (
+                                        {!isUserRole && !isPembinaPolresRole && (
                                           <button
                                             onClick={() => {
                                               setActivePesertaId(item.id);
@@ -7026,17 +8073,17 @@ export default function App() {
                   const sltaItems = overallStandingsData
                     .filter(item => item.jenjang === 'SLTA')
                     .sort((a, b) => {
-                      if (a.calc.mandatoryCompleted && b.calc.mandatoryCompleted) {
+                      if (a.calc.hasAnyScore && b.calc.hasAnyScore) {
                         return (a.jenjangRank || 999) - (b.jenjangRank || 999);
                       }
-                      if (a.calc.mandatoryCompleted) return -1;
-                      if (b.calc.mandatoryCompleted) return 1;
+                      if (a.calc.hasAnyScore) return -1;
+                      if (b.calc.hasAnyScore) return 1;
                       return (a.nomor || '').localeCompare(b.nomor || '');
                     });
 
-                  const j1 = sltaItems.find(t => t.jenjangRank === 1 && t.calc.mandatoryCompleted);
-                  const j2 = sltaItems.find(t => t.jenjangRank === 2 && t.calc.mandatoryCompleted);
-                  const j3 = sltaItems.find(t => t.jenjangRank === 3 && t.calc.mandatoryCompleted);
+                  const j1 = sltaItems.find(t => t.jenjangRank === 1 && t.calc.hasAnyScore);
+                  const j2 = sltaItems.find(t => t.jenjangRank === 2 && t.calc.hasAnyScore);
+                  const j3 = sltaItems.find(t => t.jenjangRank === 3 && t.calc.hasAnyScore);
 
                   return (
                     <div className="bg-white rounded-2xl shadow-md border-2 border-indigo-200 overflow-hidden">
@@ -7099,7 +8146,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
 
@@ -7123,7 +8170,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
 
@@ -7147,7 +8194,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
                         </div>
@@ -7198,7 +8245,7 @@ export default function App() {
                                 let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
                                 let rowHighlight = '';
 
-                                if (item.calc.mandatoryCompleted && displayRank !== null) {
+                                if (item.calc.hasAnyScore && displayRank !== null) {
                                   if (displayRank === 1) {
                                     rankBadge = (
                                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-xs">
@@ -7232,9 +8279,13 @@ export default function App() {
                                   <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
                                     Lengkap
                                   </span>
+                                ) : item.calc.hasAnyScore ? (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800 whitespace-nowrap">
+                                    Proses ({item.calc.completedCategoriesCount}/{item.calc.totalCategoriesCount} Kat.)
+                                  </span>
                                 ) : (
-                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
-                                    Proses ({item.calc.completedCategoriesCount}/{item.calc.totalCategoriesCount})
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-slate-100 text-slate-500">
+                                    Belum Dinilai
                                   </span>
                                 );
 
@@ -7255,11 +8306,11 @@ export default function App() {
                                     {/* Kolom Tiap Mata Lomba (Peringkat SLTA Mandiri) */}
                                     {categories.map(cat => {
                                       const s = item.calc.categorySummaries[cat.key]?.sum || 0;
-                                      const isDone = item.calc.categorySummaries[cat.key]?.isComplete;
+                                      const hasCatScored = item.calc.categorySummaries[cat.key]?.hasScored;
                                       const cRank = item.catRanks[cat.key]?.jenjangRank;
 
                                       let rankPill = null;
-                                      if (isDone && cRank !== null && cRank !== undefined) {
+                                      if (hasCatScored && cRank !== null && cRank !== undefined) {
                                         if (cRank === 1) {
                                           rankPill = (
                                             <span className="block text-[9px] font-black text-amber-900 bg-amber-200/90 rounded px-1 py-0.2 mt-0.5">
@@ -7322,7 +8373,7 @@ export default function App() {
                                         >
                                           <Printer className="w-4 h-4" />
                                         </button>
-                                        {!isUserRole && (
+                                        {!isUserRole && !isPembinaPolresRole && (
                                           <button
                                             onClick={() => {
                                               setActivePesertaId(item.id);
@@ -7422,7 +8473,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
 
@@ -7446,7 +8497,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
 
@@ -7470,7 +8521,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
                         </div>
@@ -7517,7 +8568,7 @@ export default function App() {
                                 let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
                                 let rowHighlight = '';
 
-                                if (item.catSummary.isComplete && activeRank !== null) {
+                                if (item.catSummary.hasScored && activeRank !== null) {
                                   if (activeRank === 1) {
                                     rankBadge = (
                                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-xs">
@@ -7551,9 +8602,13 @@ export default function App() {
                                   <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
                                     Lengkap
                                   </span>
-                                ) : (
-                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
+                                ) : item.catSummary.hasScored ? (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800 whitespace-nowrap">
                                     Proses ({item.catSummary.count}/{item.catSummary.totalCriteria})
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-slate-100 text-slate-500">
+                                    Belum Dinilai
                                   </span>
                                 );
 
@@ -7588,7 +8643,7 @@ export default function App() {
                                     </td>
                                     <td className="py-3 px-3 text-center">{statusBadge}</td>
                                     <td className="py-3 px-3 text-center no-print">
-                                      {!isUserRole && (
+                                      {!isUserRole && !isPembinaPolresRole && (
                                         <button
                                           onClick={() => {
                                             setActivePesertaId(item.id);
@@ -7680,7 +8735,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
 
@@ -7704,7 +8759,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
 
@@ -7728,7 +8783,7 @@ export default function App() {
                                 </div>
                               </div>
                             ) : (
-                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada peserta lengkap</p>
+                              <p className="text-xs text-slate-400 italic py-3 text-center">Belum ada nilai masuk</p>
                             )}
                           </div>
                         </div>
@@ -7775,7 +8830,7 @@ export default function App() {
                                 let rankBadge = <span className="text-slate-400 text-xs font-semibold">-</span>;
                                 let rowHighlight = '';
 
-                                if (item.catSummary.isComplete && activeRank !== null) {
+                                if (item.catSummary.hasScored && activeRank !== null) {
                                   if (activeRank === 1) {
                                     rankBadge = (
                                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-400 text-amber-950 shadow-xs">
@@ -7809,9 +8864,13 @@ export default function App() {
                                   <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">
                                     Lengkap
                                   </span>
-                                ) : (
-                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800">
+                                ) : item.catSummary.hasScored ? (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-800 whitespace-nowrap">
                                     Proses ({item.catSummary.count}/{item.catSummary.totalCriteria})
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-slate-100 text-slate-500">
+                                    Belum Dinilai
                                   </span>
                                 );
 
@@ -7846,7 +8905,7 @@ export default function App() {
                                     </td>
                                     <td className="py-3 px-3 text-center">{statusBadge}</td>
                                     <td className="py-3 px-3 text-center no-print">
-                                      {!isUserRole && (
+                                      {!isUserRole && !isPembinaPolresRole && (
                                         <button
                                           onClick={() => {
                                             setActivePesertaId(item.id);
@@ -8040,7 +9099,7 @@ export default function App() {
         {/* ==================================================== */}
         {/* TAB KERANGKA: FORMULIR PENDAFTARAN RESMI PKS */}
         {/* ==================================================== */}
-        {['form_polisi_pelajar', 'form_calon_pks', 'form_perkemahan_balok1', 'form_perkemahan_balok2'].includes(currentTab) && (
+        {!isPembinaPolresRole && ['form_polisi_pelajar', 'form_calon_pks', 'form_perkemahan_balok1', 'form_perkemahan_balok2'].includes(currentTab) && (
           <RegistrationFormsView
             currentTab={currentTab}
             setCurrentTab={setCurrentTab}
@@ -8070,7 +9129,7 @@ export default function App() {
         {/* ==================================================== */}
         {/* TAB ADMIN: REKAPITULASI PENDAFTARAN SEKOLAH MANDIRI */}
         {/* ==================================================== */}
-        {currentTab === 'rekap_pendaftaran' && (
+        {currentTab === 'rekap_pendaftaran' && (isAdminRole || isPembinaPolresRole) && (
           <RegistrationSubmissionsAdminView
             submissionsList={registrationsList}
             paymentConfig={paymentConfig}
@@ -8086,10 +9145,10 @@ export default function App() {
         {/* ==================================================== */}
         {currentTab === 'anggota_pks' && (
           <MembersDirectoryView
-            submissionsList={registrationsList}
+            submissionsList={scopedRegistrationsList}
             currentUser={currentUser}
             paymentConfig={paymentConfig}
-            onNavigateToForm={(targetTab) => setCurrentTab(targetTab)}
+            onNavigateToForm={isPembinaPolresRole ? undefined : (targetTab) => setCurrentTab(targetTab)}
             onLogActivity={(cat, title, details) => logActivity(cat, title, details)}
             showToast={showToast}
           />
@@ -8160,6 +9219,7 @@ export default function App() {
               </div>
               <button
                 onClick={() => {
+                  setModalErrorBanner(null);
                   setModalUserOpen(false);
                   setEditingUserOriginalUsername(null);
                 }}
@@ -8173,6 +9233,7 @@ export default function App() {
             <div className="flex border-b border-slate-200 bg-slate-50 px-5 pt-3 gap-2 shrink-0">
               <button
                 onClick={() => {
+                  setModalErrorBanner(null);
                   setEditingUserOriginalUsername(null);
                   setUserFormTab('list');
                 }}
@@ -8187,6 +9248,7 @@ export default function App() {
 
               <button
                 onClick={() => {
+                  setModalErrorBanner(null);
                   setEditingUserOriginalUsername(null);
                   setUserFormData({
                     username: '',
@@ -8222,6 +9284,10 @@ export default function App() {
             {/* TAB 1: FORM TAMBAH PENGGUNA */}
             {userFormTab === 'add' && (
               <form onSubmit={handleSaveUser} className="p-5 space-y-4 overflow-y-auto flex-1">
+                <NetworkErrorBanner
+                  error={modalErrorBanner}
+                  onDismiss={() => setModalErrorBanner(null)}
+                />
                 <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3 text-xs text-blue-800">
                   <strong>Tambah Akun Baru:</strong> Buat akun juri lapangan, admin panitia, atau akun tamu untuk kontingen sekolah.
                 </div>
@@ -8285,7 +9351,8 @@ export default function App() {
                     )}
                     <option value="admin">Admin Panitia (Akses Terbatas: Kelola Peserta, Nilai & Akun Sekolah)</option>
                     <option value="juri">Juri Lapangan (Bisa Input, Upload Foto Form, & Perbarui Nilai Lomba)</option>
-                    <option value="sekolah">Perwakilan Sekolah (Kelola Kontingen & Formulir Pendaftaran)</option>
+                    <option value="pembina_polres">Pembina Polres (Akses Terbatas: Ringkasan, Nama Sekolah, Anggota PKS, Rekapitulasi & Rekap Pendaftaran)</option>
+                    <option value="sekolah">Akun Sekolah (Form Pendaftaran PKS & Data Anggota Sekolah Sendiri)</option>
                     <option value="user">User / Tamu / Peninjau (Hanya Lihat Nilai Mentah & Cetak)</option>
                   </select>
                 </div>
@@ -8342,16 +9409,30 @@ export default function App() {
                 <div className="pt-3 flex justify-end gap-2 border-t border-slate-200">
                   <button
                     type="button"
-                    onClick={() => setUserFormTab('list')}
-                    className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 cursor-pointer"
+                    disabled={isSavingUser}
+                    onClick={() => {
+                      setModalErrorBanner(null);
+                      setUserFormTab('list');
+                    }}
+                    className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 disabled:opacity-50 cursor-pointer"
                   >
                     Batal
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5"
+                    disabled={isSavingUser}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5"
                   >
-                    <UserPlus className="w-4 h-4" /> Simpan Pengguna Baru
+                    {isSavingUser ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Menyimpan...</span>
+                      </>
+                    ) : (
+                      <>
+                        <UserPlus className="w-4 h-4" /> Simpan Pengguna Baru
+                      </>
+                    )}
                   </button>
                 </div>
               </form>
@@ -8360,6 +9441,10 @@ export default function App() {
             {/* TAB 2: EDIT PENGGUNA & PASSWORD */}
             {userFormTab === 'edit' && editingUserOriginalUsername && (
               <form onSubmit={handleUpdateUser} className="p-5 space-y-4 overflow-y-auto flex-1">
+                <NetworkErrorBanner
+                  error={modalErrorBanner}
+                  onDismiss={() => setModalErrorBanner(null)}
+                />
                 <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900 flex items-center justify-between">
                   <div>
                     <span className="font-bold">Mode Edit Akun Pengguna:</span>
@@ -8452,7 +9537,8 @@ export default function App() {
                     )}
                     <option value="admin">Admin Panitia (Akses Terbatas: Kelola Peserta, Nilai & Akun Sekolah)</option>
                     <option value="juri">Juri Lapangan (Bisa Input, Upload Foto Form, & Perbarui Nilai Lomba)</option>
-                    <option value="sekolah">Perwakilan Sekolah (Kelola Kontingen & Formulir Pendaftaran)</option>
+                    <option value="pembina_polres">Pembina Polres (Akses Terbatas: Ringkasan, Nama Sekolah, Anggota PKS, Rekapitulasi & Rekap Pendaftaran)</option>
+                    <option value="sekolah">Akun Sekolah (Form Pendaftaran PKS & Data Anggota Sekolah Sendiri)</option>
                     <option value="user">User / Tamu / Peninjau (Hanya Lihat Nilai Mentah & Cetak)</option>
                   </select>
                   {(editingUserOriginalUsername === 'admin' || editingUserOriginalUsername === 'administrator') && (
@@ -8515,16 +9601,27 @@ export default function App() {
                 <div className="pt-3 flex justify-end gap-2 border-t border-slate-200">
                   <button
                     type="button"
+                    disabled={isSavingUser}
                     onClick={handleCancelEditUser}
-                    className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 cursor-pointer"
+                    className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 disabled:opacity-50 cursor-pointer"
                   >
                     Batal
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5"
+                    disabled={isSavingUser}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-amber-400 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5"
                   >
-                    <Check className="w-4 h-4" /> Simpan Perubahan Akun & Password
+                    {isSavingUser ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Menyimpan...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-4 h-4" /> Simpan Perubahan Akun & Password
+                      </>
+                    )}
                   </button>
                 </div>
               </form>
@@ -8535,6 +9632,7 @@ export default function App() {
               const adminCount = usersList.filter(u => u.role === 'superadmin' || u.role === 'admin' || u.username === 'admin' || u.username === 'administrator').length;
               const juriCount = usersList.filter(u => u.role === 'juri' && u.username !== 'admin' && u.username !== 'administrator').length;
               const sekolahCount = usersList.filter(u => u.role === 'sekolah').length;
+              const pembinaPolresCount = usersList.filter(u => u.role === 'pembina_polres').length;
               const tamuCount = usersList.filter(u => u.role === 'user').length;
 
               const filteredUsers = usersList.filter(u => {
@@ -8553,6 +9651,7 @@ export default function App() {
                 { id: 'all' as const, label: 'Semua Akun', count: usersList.length, activeCls: 'bg-slate-900 text-white border-slate-900' },
                 { id: 'admin' as const, label: 'Admin & Super Admin', count: adminCount, activeCls: 'bg-blue-600 text-white border-blue-600' },
                 { id: 'juri' as const, label: 'Juri Lapangan', count: juriCount, activeCls: 'bg-amber-600 text-white border-amber-600' },
+                { id: 'pembina_polres' as const, label: 'Pembina Polres', count: pembinaPolresCount, activeCls: 'bg-cyan-600 text-white border-cyan-600' },
                 { id: 'sekolah' as const, label: 'Sekolah', count: sekolahCount, activeCls: 'bg-emerald-600 text-white border-emerald-600' },
                 { id: 'user' as const, label: 'Tamu / User', count: tamuCount, activeCls: 'bg-slate-700 text-white border-slate-700' },
               ];
@@ -8563,7 +9662,7 @@ export default function App() {
                     <div>
                       <span className="font-bold text-slate-800">Hierarki Hak Akses:</span>
                       <span className="ml-1 text-slate-600">
-                        <strong>Super Admin</strong> (kontrol penuh), <strong>Admin Panitia</strong> (peserta, nilai & sekolah), <strong>Juri</strong> (input nilai), <strong>Sekolah</strong> (biodata & form).
+                        <strong>Super Admin</strong> (kontrol penuh), <strong>Admin Panitia</strong> (peserta, nilai & sekolah), <strong>Juri</strong> (input nilai), <strong>Pembina Polres</strong> (Ringkasan, Nama Sekolah, Anggota PKS, Rekapitulasi & Rekap Pendaftaran), <strong>Sekolah</strong> (Form Pendaftaran & Data Sekolahnya Sendiri).
                       </span>
                     </div>
                     <span className="font-semibold text-slate-700 shrink-0">Total {usersList.length} Akun</span>
@@ -8741,6 +9840,10 @@ export default function App() {
                                     <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-100 text-emerald-900 border border-emerald-300">
                                       SEKOLAH
                                     </span>
+                                  ) : u.role === 'pembina_polres' ? (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-cyan-100 text-cyan-900 border border-cyan-300">
+                                      PEMBINA POLRES
+                                    </span>
                                   ) : (
                                     <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-slate-100 text-slate-800 border border-slate-300">
                                       TAMU
@@ -8828,7 +9931,10 @@ export default function App() {
                 Pengaturan Nilai Maksimal Juknis Panitia
               </h3>
               <button
-                onClick={() => setModalConfigOpen(false)}
+                onClick={() => {
+                  setModalErrorBanner(null);
+                  setModalConfigOpen(false);
+                }}
                 className="text-slate-400 hover:text-white text-xl cursor-pointer"
               >
                 <X className="w-5 h-5" />
@@ -8842,6 +9948,10 @@ export default function App() {
             </div>
 
             <form onSubmit={handleSaveCategoriesConfig} className="p-5 overflow-y-auto flex-1 space-y-4">
+              <NetworkErrorBanner
+                error={modalErrorBanner}
+                onDismiss={() => setModalErrorBanner(null)}
+              />
               <div className="space-y-3">
                 {tempCategoriesConfig.map((cat, idx) => (
                   <div
@@ -8902,8 +10012,9 @@ export default function App() {
               <div className="pt-4 flex justify-between items-center border-t border-slate-200 shrink-0">
                 <button
                   type="button"
+                  disabled={isSavingConfig}
                   onClick={handleResetCategoriesToDefault}
-                  className="text-xs text-rose-600 hover:text-rose-800 font-bold flex items-center gap-1 cursor-pointer"
+                  className="text-xs text-rose-600 hover:text-rose-800 disabled:opacity-50 font-bold flex items-center gap-1 cursor-pointer"
                 >
                   <RotateCcw className="w-3.5 h-3.5" /> Kembalikan ke Standar Awal
                 </button>
@@ -8911,16 +10022,28 @@ export default function App() {
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setModalConfigOpen(false)}
-                    className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 cursor-pointer"
+                    disabled={isSavingConfig}
+                    onClick={() => {
+                      setModalErrorBanner(null);
+                      setModalConfigOpen(false);
+                    }}
+                    className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 disabled:opacity-50 cursor-pointer"
                   >
                     Batal
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer"
+                    disabled={isSavingConfig}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5"
                   >
-                    Simpan Perubahan
+                    {isSavingConfig ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Menyimpan...</span>
+                      </>
+                    ) : (
+                      <span>Simpan Perubahan</span>
+                    )}
                   </button>
                 </div>
               </div>
@@ -8941,13 +10064,20 @@ export default function App() {
                 {editingPesertaId ? 'Edit Identitas Peserta' : 'Tambah Peserta Baru'}
               </h3>
               <button
-                onClick={() => setModalPesertaOpen(false)}
+                onClick={() => {
+                  setModalErrorBanner(null);
+                  setModalPesertaOpen(false);
+                }}
                 className="text-slate-400 hover:text-white text-xl cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleSavePeserta} className="p-5 space-y-4">
+              <NetworkErrorBanner
+                error={modalErrorBanner}
+                onDismiss={() => setModalErrorBanner(null)}
+              />
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
                   Nomor Peserta *
@@ -9060,16 +10190,28 @@ export default function App() {
               <div className="pt-3 flex justify-end gap-2 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setModalPesertaOpen(false)}
-                  className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 cursor-pointer"
+                  disabled={isSavingPeserta}
+                  onClick={() => {
+                    setModalErrorBanner(null);
+                    setModalPesertaOpen(false);
+                  }}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 disabled:opacity-50 cursor-pointer"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer"
+                  disabled={isSavingPeserta}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5"
                 >
-                  Simpan Data
+                  {isSavingPeserta ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Menyimpan...</span>
+                    </>
+                  ) : (
+                    <span>Simpan Data</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -9129,7 +10271,7 @@ export default function App() {
                     <strong>Peringkat Klasemen:</strong>{' '}
                     {printTargetParticipant.rank
                       ? `Peringkat / Juara ${printTargetParticipant.rank}`
-                      : 'Belum Lengkap'}
+                      : 'Belum Dinilai'}
                   </p>
                 </div>
               </div>
@@ -9160,7 +10302,11 @@ export default function App() {
                           {(summary?.pct || 0).toFixed(2)}%
                         </td>
                         <td className="p-2 text-center">
-                          {summary?.isComplete ? 'Selesai' : 'Belum Lengkap'}
+                          {summary?.isComplete
+                            ? 'Lengkap'
+                            : summary?.hasScored
+                            ? `Proses (${summary.count}/${summary.totalCriteria})`
+                            : 'Belum Dinilai'}
                         </td>
                       </tr>
                     );
@@ -9177,7 +10323,11 @@ export default function App() {
                       {(printTargetParticipant.calc?.grandPct || 0).toFixed(2)}%
                     </td>
                     <td className="p-2.5 text-center">
-                      {printTargetParticipant.calc?.mandatoryCompleted ? 'LENGKAP' : 'PENDING'}
+                      {printTargetParticipant.calc?.mandatoryCompleted
+                        ? 'LENGKAP'
+                        : printTargetParticipant.calc?.hasAnyScore
+                        ? 'PROSES'
+                        : 'BELUM DINILAI'}
                     </td>
                   </tr>
                 </tfoot>
@@ -9464,7 +10614,7 @@ export default function App() {
       {/* MODAL: DAFTAR NAMA PESERTA & SEKOLAH (DOWNLOAD & CETAK) */}
       {/* ==================================================== */}
       {modalDaftarPesertaOpen && (() => {
-        const filteredList = pesertaList.filter(p => {
+        const filteredList = scopedPesertaList.filter(p => {
           const matchJenjang = daftarPesertaFilterJenjang === 'all' || (p.jenjang || 'SLTP') === daftarPesertaFilterJenjang;
           const q = daftarPesertaSearch.toLowerCase().trim();
           const matchSearch =
@@ -9476,8 +10626,8 @@ export default function App() {
           return matchJenjang && matchSearch;
         });
 
-        const totalSLTP = pesertaList.filter(p => (p.jenjang || 'SLTP') === 'SLTP').length;
-        const totalSLTA = pesertaList.filter(p => p.jenjang === 'SLTA').length;
+        const totalSLTP = scopedPesertaList.filter(p => (p.jenjang || 'SLTP') === 'SLTP').length;
+        const totalSLTA = scopedPesertaList.filter(p => p.jenjang === 'SLTA').length;
 
         return (
           <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-xs z-50 overflow-y-auto p-4 sm:p-6 flex justify-center print:p-0 print:bg-white">
@@ -9492,7 +10642,7 @@ export default function App() {
                     <h3 className="font-bold text-base leading-tight flex items-center gap-2">
                       <span>Daftar Nama Peserta & Sekolah Kontingen</span>
                       <span className="text-[11px] bg-blue-500/30 text-blue-300 px-2 py-0.5 rounded-full border border-blue-400/30">
-                        {pesertaList.length} Terdaftar
+                        {scopedPesertaList.length} Terdaftar
                       </span>
                     </h3>
                     <p className="text-xs text-slate-400 mt-0.5">
@@ -9544,7 +10694,7 @@ export default function App() {
                           : 'text-slate-600 hover:text-slate-900'
                       }`}
                     >
-                      Semua ({pesertaList.length})
+                      Semua ({scopedPesertaList.length})
                     </button>
                     <button
                       onClick={() => setDaftarPesertaFilterJenjang('SLTP')}
@@ -9746,7 +10896,7 @@ export default function App() {
                 {/* Footer Dokumen Cetak & Ringkasan */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-end pt-2 text-xs">
                   <div className="space-y-1 text-slate-600">
-                    <p><strong>Total Peserta Terdaftar:</strong> {pesertaList.length} Kontingen Sekolah</p>
+                    <p><strong>Total Peserta Terdaftar:</strong> {scopedPesertaList.length} Kontingen Sekolah</p>
                     <p><strong>Rincian Tingkat:</strong> {totalSLTP} Sekolah SLTP, {totalSLTA} Sekolah SLTA</p>
                     <p className="text-[11px] text-slate-400 italic">
                       Dicetak otomatis melalui Sistem Rekapitulasi Nilai Lomba PKS pada {new Date().toLocaleString('id-ID')}.
@@ -9789,21 +10939,30 @@ export default function App() {
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
+                disabled={confirmLoading}
                 onClick={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
-                className="px-3.5 py-1.5 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 cursor-pointer"
+                className="px-3.5 py-1.5 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 disabled:opacity-50 cursor-pointer"
               >
                 Batal
               </button>
               <button
                 type="button"
+                disabled={confirmLoading}
                 onClick={confirmModal.onConfirm}
-                className={`px-3.5 py-1.5 text-white text-xs font-bold rounded-xl shadow cursor-pointer ${
+                className={`px-3.5 py-1.5 text-white text-xs font-bold rounded-xl shadow cursor-pointer flex items-center gap-1.5 disabled:opacity-60 ${
                   confirmModal.isDanger
                     ? 'bg-rose-600 hover:bg-rose-700'
                     : 'bg-blue-600 hover:bg-blue-700'
                 }`}
               >
-                {confirmModal.confirmText || 'Konfirmasi'}
+                {confirmLoading ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Menyimpan...</span>
+                  </>
+                ) : (
+                  <span>{confirmModal.confirmText || 'Konfirmasi'}</span>
+                )}
               </button>
             </div>
           </div>
@@ -9833,6 +10992,7 @@ export default function App() {
               </div>
               <button
                 onClick={() => {
+                  setModalErrorBanner(null);
                   setModalScanOpen(false);
                   setScanPreviewUrl(null);
                   setScannedResult(null);
@@ -9867,6 +11027,10 @@ export default function App() {
 
             {/* Modal Body */}
             <div className="p-5 overflow-y-auto space-y-5 flex-1">
+              <NetworkErrorBanner
+                error={modalErrorBanner}
+                onDismiss={() => setModalErrorBanner(null)}
+              />
               {/* Langkah 1: Upload / Ambil Foto */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
@@ -10107,13 +11271,15 @@ export default function App() {
             <div className="bg-slate-50 px-5 py-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 shrink-0">
               <button
                 type="button"
+                disabled={isSavingScanScores}
                 onClick={() => {
+                  setModalErrorBanner(null);
                   setModalScanOpen(false);
                   setScanPreviewUrl(null);
                   setScannedResult(null);
                   setScanError(null);
                 }}
-                className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 cursor-pointer"
+                className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-100 disabled:opacity-50 cursor-pointer"
               >
                 Tutup
               </button>
@@ -10121,11 +11287,21 @@ export default function App() {
               {scannedResult && (
                 <button
                   type="button"
-                  onClick={handleApplyScannedScores}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 px-5 rounded-xl text-xs flex items-center gap-2 shadow cursor-pointer transition"
+                  disabled={isSavingScanScores}
+                  onClick={() => void handleApplyScannedScores()}
+                  className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-bold py-2 px-5 rounded-xl text-xs flex items-center gap-2 shadow cursor-pointer transition"
                 >
-                  <Check className="w-4 h-4" />
-                  <span>Terapkan Nilai & Simpan Foto Lembar Juri</span>
+                  {isSavingScanScores ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Menyimpan Nilai & Foto...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4" />
+                      <span>Terapkan Nilai & Simpan Foto Lembar Juri</span>
+                    </>
+                  )}
                 </button>
               )}
             </div>
@@ -10226,6 +11402,7 @@ export default function App() {
         isOpen={modalCloudInfoOpen}
         onClose={() => setModalCloudInfoOpen(false)}
         cloudStatus={cloudStatus}
+        cloudQuotaExceeded={cloudQuotaExceeded}
         lastSynced={cloudLastSynced}
         pesertaCount={pesertaList.length}
         usersCount={usersList.length}
@@ -10255,11 +11432,14 @@ export default function App() {
         onSave={async (newCfg: PaymentConfig) => {
           const res = await savePaymentConfigToCloud(newCfg);
           if (res.success) {
+            setCloudStatus('connected');
+            setCloudLastSynced(new Date());
             setPaymentConfig(newCfg);
             logActivity('data_edit', 'Ubah Tarif & Payment Gateway', 'Memperbarui konfigurasi biaya pendaftaran & metode pembayaran.');
             showToast('Pengaturan tarif & payment gateway berhasil disimpan ke Cloud!', 'success');
             return true;
           } else {
+            setCloudStatus(res.isNetworkError ? 'offline' : 'error');
             showToast(`Gagal menyimpan ke Cloud: ${res.error}`, 'error');
             return false;
           }
@@ -10277,11 +11457,14 @@ export default function App() {
         onSaveBlankoConfig={async (newCfg) => {
           const res = await saveBlankoConfigToCloud(newCfg);
           if (res.success) {
+            setCloudStatus('connected');
+            setCloudLastSynced(new Date());
             setBlankoConfig(newCfg);
             logActivity('data_edit', 'Edit Master Format Blangko', 'Memperbarui template kop surat, syarat berkas, dan tanda tangan blangko.');
             showToast('Format blangko berhasil disimpan ke Cloud!', 'success');
             return true;
           } else {
+            setCloudStatus(res.isNetworkError ? 'offline' : 'error');
             showToast(`Gagal menyimpan ke Cloud: ${res.error}`, 'error');
             return false;
           }

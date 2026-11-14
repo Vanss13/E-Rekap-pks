@@ -2,7 +2,8 @@ import {
   ActivityCategory,
   ActivityLogEntry,
   LocationCaptureStatus,
-  saveActivityLogToCloud
+  saveActivityLogToCloud,
+  isCloudWriteQuotaExceeded
 } from './firebase';
 
 export const ACTIVITY_LOGS_STORAGE_KEY = 'pks_activity_logs_v1';
@@ -13,7 +14,7 @@ const FAILED_CACHE_TTL_MS = 45 * 1000; // 45 seconds
 export interface ActivityActor {
   username: string;
   name: string;
-  role: 'superadmin' | 'admin' | 'juri' | 'sekolah' | 'user';
+  role: 'superadmin' | 'admin' | 'juri' | 'sekolah' | 'pembina_polres' | 'user';
 }
 
 interface LocationSnapshot {
@@ -229,7 +230,7 @@ export async function recordUserActivity({
   const { dateLabel, timeLabel, timestampIso } = formatLocalDateTime(new Date());
   const loc = await captureBrowserLocation(forceRefreshLocation);
 
-  const safeUsername = String(user.username).trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '_').slice(0, 100) || 'user';
+  const safeUsername = String(user.username).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 100) || 'user';
   const randSuffix = Math.random().toString(36).slice(2, 8);
   const logId = `log_${Date.now()}_${safeUsername.slice(0, 24)}_${randSuffix}`;
 
@@ -260,8 +261,11 @@ export async function recordUserActivity({
     onRecorded(entry);
   }
 
-  // Persist to Cloud Firestore asynchronously
-  void saveActivityLogToCloud(entry);
+  // Routine tab navigation logs are stored locally to conserve Firestore daily write quota;
+  // critical domain events persist to Cloud unless daily quota is exhausted.
+  if (actionCategory !== 'navigation' && !isCloudWriteQuotaExceeded()) {
+    void saveActivityLogToCloud(entry);
+  }
 
   return entry;
 }

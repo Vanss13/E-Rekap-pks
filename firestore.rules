@@ -56,7 +56,7 @@ service cloud.firestore {
         && data.id is string && data.id.size() > 0 && data.id.size() <= 128
         && data.username is string && data.username.size() > 0 && data.username.size() <= 100
         && data.userName is string && data.userName.size() > 0 && data.userName.size() <= 150
-        && data.userRole in ['superadmin', 'admin', 'juri', 'sekolah', 'user']
+        && data.userRole in ['superadmin', 'admin', 'juri', 'sekolah', 'pembina_polres', 'user']
         && data.actionCategory in ['auth', 'navigation', 'scoring', 'registration', 'data_edit', 'data_delete', 'export', 'system']
         && data.actionTitle is string && data.actionTitle.size() > 0 && data.actionTitle.size() <= 150
         && data.details is string && data.details.size() <= 500

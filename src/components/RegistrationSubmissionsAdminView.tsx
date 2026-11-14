@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { RegistrationSubmission, deleteRegistrationFromCloud, saveRegistrationToCloud, PaymentConfig, ActivityCategory } from '../lib/firebase';
 import { AppUser } from '../App';
+import { NetworkErrorBanner, NetworkErrorState } from './NetworkErrorBanner';
 
 interface RegistrationSubmissionsAdminViewProps {
   submissionsList: RegistrationSubmission[];
@@ -60,9 +61,17 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
   const [verifyNote, setVerifyNote] = useState('');
   const [officialNumberInput, setOfficialNumberInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [verifyNetworkError, setVerifyNetworkError] = useState<NetworkErrorState | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [listNetworkError, setListNetworkError] = useState<NetworkErrorState | null>(null);
 
   // Zoom Proof Image Modal
   const [zoomProofUrl, setZoomProofUrl] = useState<string | null>(null);
+
+  const isAdminViewer = Boolean(
+    currentUser && (currentUser.role === 'admin' || currentUser.role === 'superadmin')
+  );
 
   const formatRupiah = (val: number) => {
     return new Intl.NumberFormat('id-ID', {
@@ -158,6 +167,7 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
 
   // Open Stage 1 Verification
   const handleOpenStage1 = (sub: RegistrationSubmission) => {
+    setVerifyNetworkError(null);
     setSelectedSubmission(sub);
     setVerifyModalType('stage1');
     setVerifyActionStatus('approved');
@@ -166,6 +176,7 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
 
   // Open Stage 2 Verification
   const handleOpenStage2 = (sub: RegistrationSubmission) => {
+    setVerifyNetworkError(null);
     setSelectedSubmission(sub);
     setVerifyModalType('stage2');
     setVerifyActionStatus('approved');
@@ -179,9 +190,14 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
   // Submit Verification
   const handleProcessVerification = async (e: React.FormEvent) => {
     e.preventDefault();
+    await executeVerifySave();
+  };
+
+  const executeVerifySave = async () => {
     if (!selectedSubmission) return;
 
     setIsProcessing(true);
+    setVerifyNetworkError(null);
     try {
       const verifierName = currentUser?.name || currentUser?.username || 'Admin';
       const nowStr = new Date().toLocaleString('id-ID');
@@ -213,7 +229,18 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
 
       updatedSub.updatedAt = new Date().toISOString();
 
-      await saveRegistrationToCloud(updatedSub);
+      const res = await saveRegistrationToCloud(updatedSub);
+      if (!res.success) {
+        setVerifyNetworkError({
+          title: 'Gagal Menyimpan Verifikasi Berkas ke Cloud',
+          message: res.error || 'Gangguan jaringan saat menyimpan keputusan verifikasi.',
+          isNetworkError: res.isNetworkError,
+          onRetry: executeVerifySave
+        });
+        showToast(res.error || 'Gagal menyimpan verifikasi berkas ke Cloud.', 'error');
+        return;
+      }
+
       setSelectedSubmission(updatedSub);
       setVerifyModalType(null);
       onLogActivity?.(
@@ -228,26 +255,58 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
         'success'
       );
     } catch (err: any) {
+      setVerifyNetworkError({
+        title: 'Gagal Memverifikasi Berkas',
+        message: err?.message || 'Terjadi gangguan jaringan.',
+        isNetworkError: true,
+        onRetry: executeVerifySave
+      });
       showToast(`Gagal memverifikasi berkas: ${err.message}`, 'error');
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // Delete submission
-  const handleDeleteSubmission = async (id: string, name: string) => {
-    if (window.confirm(`Yakin ingin menghapus berkas pendaftaran "${name}"? Tindakan ini tidak dapat dibatalkan.`)) {
-      try {
-        await deleteRegistrationFromCloud(id);
-        if (selectedSubmission?.id === id) {
-          setSelectedSubmission(null);
-        }
-        onLogActivity?.('data_delete', 'Hapus Berkas Pendaftaran', `Menghapus pengajuan pendaftaran "${name}" (ID: ${id}).`);
-        showToast('Berkas pendaftaran berhasil dihapus dari Cloud.', 'info');
-      } catch (err: any) {
-        showToast(`Gagal menghapus berkas: ${err.message}`, 'error');
+  // Delete submission (in-app confirmation + awaited Cloud check)
+  const executeDeleteSubmission = async (id: string, name: string) => {
+    setDeletingId(id);
+    setListNetworkError(null);
+    try {
+      const res = await deleteRegistrationFromCloud(id);
+      if (!res.success) {
+        setConfirmDeleteTarget(null);
+        setListNetworkError({
+          title: 'Gagal Menghapus Berkas Pendaftaran dari Cloud',
+          message: res.error || 'Terjadi gangguan jaringan saat menghapus berkas pendaftaran.',
+          isNetworkError: res.isNetworkError,
+          onRetry: () => executeDeleteSubmission(id, name)
+        });
+        showToast(res.error || 'Gagal menghapus berkas dari Cloud.', 'error');
+        return;
       }
+
+      if (selectedSubmission?.id === id) {
+        setSelectedSubmission(null);
+      }
+      setConfirmDeleteTarget(null);
+      onLogActivity?.('data_delete', 'Hapus Berkas Pendaftaran', `Menghapus pengajuan pendaftaran "${name}" (ID: ${id}).`);
+      showToast('Berkas pendaftaran berhasil dihapus dari Cloud.', 'info');
+    } catch (err: any) {
+      setConfirmDeleteTarget(null);
+      setListNetworkError({
+        title: 'Gagal Menghapus Berkas Pendaftaran',
+        message: err?.message || 'Terjadi gangguan jaringan saat menghapus berkas.',
+        isNetworkError: true,
+        onRetry: () => executeDeleteSubmission(id, name)
+      });
+      showToast(`Gagal menghapus berkas: ${err.message}`, 'error');
+    } finally {
+      setDeletingId(null);
     }
+  };
+
+  const handleDeleteSubmission = (id: string, name: string) => {
+    setConfirmDeleteTarget({ id, name });
   };
 
   // Export to Excel
@@ -318,14 +377,22 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
               <FileSpreadsheet className="w-4 h-4" />
             </span>
             <span className="text-xs font-mono uppercase tracking-wider text-blue-400">
-              Admin & Committee Dashboard
+              {isAdminViewer
+                ? 'Admin & Committee Dashboard'
+                : currentUser?.role === 'pembina_polres'
+                ? 'Pembina Polres · Mode Pantau'
+                : 'Rekap Pendaftaran Sekolah'}
             </span>
           </div>
           <h2 className="text-lg sm:text-xl font-black tracking-tight text-white">
-            Rekap & Verifikasi Berkas Pendaftaran Sekolah
+            {isAdminViewer
+              ? 'Rekap & Verifikasi Berkas Pendaftaran Sekolah'
+              : 'Rekapitulasi Pendaftaran Sekolah'}
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Kelola berkas pengajuan mandiri dari akun sekolah, bukti transfer, dan verifikasi 2-tahap (Keuangan & Panitia)
+            {isAdminViewer
+              ? 'Kelola berkas pengajuan mandiri dari akun sekolah, bukti transfer, dan verifikasi 2-tahap (Keuangan & Panitia)'
+              : 'Pantau daftar pengajuan pendaftaran sekolah, status pembayaran, dan hasil verifikasi panitia secara real-time'}
           </p>
         </div>
 
@@ -340,6 +407,8 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
           </button>
         </div>
       </div>
+
+      <NetworkErrorBanner error={listNetworkError} onDismiss={() => setListNetworkError(null)} />
 
       {/* 2. KPI Score Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -538,7 +607,7 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
                             <XCircle className="w-3.5 h-3.5 text-rose-600" />
                             <span>Ditolak</span>
                           </div>
-                        ) : (
+                        ) : isAdminViewer ? (
                           <button
                             type="button"
                             onClick={() => handleOpenStage1(sub)}
@@ -547,6 +616,11 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
                             <Clock className="w-3.5 h-3.5 text-blue-500" />
                             <span>Verif Keuangan</span>
                           </button>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-amber-700 font-semibold bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg text-[11px]">
+                            <Clock className="w-3.5 h-3.5 text-amber-500" />
+                            <span>Menunggu Keuangan</span>
+                          </span>
                         )}
                       </td>
 
@@ -573,7 +647,7 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
                           <span className="text-[11px] text-slate-400 italic">
                             Tunggu Tahap 1
                           </span>
-                        ) : (
+                        ) : isAdminViewer ? (
                           <button
                             type="button"
                             onClick={() => handleOpenStage2(sub)}
@@ -582,6 +656,11 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
                             <Shield className="w-3.5 h-3.5 text-indigo-500" />
                             <span>Sahkan Berkas</span>
                           </button>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-indigo-700 font-semibold bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-lg text-[11px]">
+                            <Clock className="w-3.5 h-3.5 text-indigo-500" />
+                            <span>Menunggu Panitia</span>
+                          </span>
                         )}
                       </td>
 
@@ -597,14 +676,21 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
                             <Eye className="w-3.5 h-3.5" />
                           </button>
 
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteSubmission(sub.id, sub.applicantName)}
-                            className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 transition cursor-pointer"
-                            title="Hapus Berkas Pengajuan"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {isAdminViewer && (
+                            <button
+                              type="button"
+                              disabled={deletingId === sub.id}
+                              onClick={() => handleDeleteSubmission(sub.id, sub.applicantName)}
+                              className="p-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 disabled:opacity-60 text-rose-600 transition cursor-pointer"
+                              title="Hapus Berkas Pengajuan"
+                            >
+                              {deletingId === sub.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -696,7 +782,7 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
                         Catatan: "{selectedSubmission.stage1Finance.note}"
                       </p>
                     )}
-                    {selectedSubmission.stage1Finance?.status !== 'approved' && (
+                    {isAdminViewer && selectedSubmission.stage1Finance?.status !== 'approved' && (
                       <button
                         type="button"
                         onClick={() => handleOpenStage1(selectedSubmission)}
@@ -735,7 +821,8 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
                         Oleh: {selectedSubmission.stage2Committee.verifiedBy} ({selectedSubmission.stage2Committee.verifiedAt})
                       </p>
                     )}
-                    {selectedSubmission.stage1Finance?.status === 'approved' &&
+                    {isAdminViewer &&
+                      selectedSubmission.stage1Finance?.status === 'approved' &&
                       selectedSubmission.stage2Committee?.status !== 'approved' && (
                         <button
                           type="button"
@@ -868,8 +955,9 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
               </div>
               <button
                 type="button"
+                disabled={isProcessing}
                 onClick={() => setVerifyModalType(null)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg"
+                className="text-slate-400 hover:text-white disabled:opacity-50 p-1 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -890,6 +978,11 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
                   </span>
                 </div>
               </div>
+
+              <NetworkErrorBanner
+                error={verifyNetworkError}
+                onDismiss={() => setVerifyNetworkError(null)}
+              />
 
               {/* Status Choice */}
               <div>
@@ -966,8 +1059,9 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
               <div className="pt-2 flex justify-end gap-2 border-t border-slate-200">
                 <button
                   type="button"
+                  disabled={isProcessing}
                   onClick={() => setVerifyModalType(null)}
-                  className="px-4 py-2 border border-slate-300 text-slate-700 hover:bg-slate-100 rounded-xl text-xs font-bold transition cursor-pointer"
+                  className="px-4 py-2 border border-slate-300 text-slate-700 hover:bg-slate-100 disabled:opacity-50 rounded-xl text-xs font-bold transition cursor-pointer"
                 >
                   Batal
                 </button>
@@ -1013,6 +1107,69 @@ export const RegistrationSubmissionsAdminView: React.FC<RegistrationSubmissionsA
               alt="Bukti Transfer Zoom"
               className="max-h-[80vh] w-auto object-contain mx-auto rounded-xl"
             />
+          </div>
+        </div>
+      )}
+
+      {/* 8. MODAL KONFIRMASI HAPUS BERKAS (IN-APP DIALOG) */}
+      {confirmDeleteTarget && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-xs z-50 flex items-center justify-center p-4 no-print">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-rose-600/20 border border-rose-500/40 rounded-xl text-rose-400">
+                  <Trash2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-white">Hapus Berkas Pendaftaran?</h3>
+                  <p className="text-[11px] text-slate-400">Tindakan ini permanen di database Cloud</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={deletingId === confirmDeleteTarget.id}
+                onClick={() => setConfirmDeleteTarget(null)}
+                className="text-slate-400 hover:text-white disabled:opacity-50 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs text-slate-700">
+              <p className="leading-relaxed">
+                Yakin ingin menghapus berkas pendaftaran atas nama{' '}
+                <strong className="text-slate-900">"{confirmDeleteTarget.name}"</strong>? Data yang dihapus tidak dapat dipulihkan kembali.
+              </p>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  disabled={deletingId === confirmDeleteTarget.id}
+                  onClick={() => setConfirmDeleteTarget(null)}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 hover:bg-slate-100 disabled:opacity-50 rounded-xl font-bold transition cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingId === confirmDeleteTarget.id}
+                  onClick={() => executeDeleteSubmission(confirmDeleteTarget.id, confirmDeleteTarget.name)}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-75 text-white rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  {deletingId === confirmDeleteTarget.id ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Menghapus...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Ya, Hapus Berkas</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

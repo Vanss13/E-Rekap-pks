@@ -83,9 +83,25 @@ export const MembersDirectoryView: React.FC<MembersDirectoryViewProps> = ({
     });
   };
 
+  const isSekolahViewer = currentUser?.role === 'sekolah';
+  const ownUsernameKey = (currentUser?.username || '').toLowerCase().trim();
+  const ownSchoolKey = (currentUser?.schoolName || currentUser?.name || '').toLowerCase().trim();
+
+  // Strictly scope submissions for Sekolah accounts so they never see other schools' members
+  const visibleSubmissions = useMemo(() => {
+    if (!isSekolahViewer) return submissionsList;
+    return submissionsList.filter(sub => {
+      const subUser = (sub.schoolUsername || '').toLowerCase().trim();
+      const subSchool = (sub.schoolName || '').toLowerCase().trim();
+      const matchUser = Boolean(ownUsernameKey && subUser && subUser === ownUsernameKey);
+      const matchSchool = Boolean(ownSchoolKey && subSchool && subSchool === ownSchoolKey);
+      return matchUser || matchSchool;
+    });
+  }, [submissionsList, isSekolahViewer, ownUsernameKey, ownSchoolKey]);
+
   // Flatten and extract individual member data from registrations
   const allMembers: ExtractedMemberItem[] = useMemo(() => {
-    return submissionsList.flatMap((sub): ExtractedMemberItem[] => {
+    return visibleSubmissions.flatMap((sub): ExtractedMemberItem[] => {
       let categoryLabel = 'Pendaftaran PKS';
       let studentName = sub.applicantName || 'Peserta';
       let identifier = '-';
@@ -194,7 +210,7 @@ export const MembersDirectoryView: React.FC<MembersDirectoryViewProps> = ({
         }
       ];
     });
-  }, [submissionsList]);
+  }, [visibleSubmissions]);
 
   // Unique schools list for filtering
   const uniqueSchools = useMemo(() => {
@@ -319,7 +335,9 @@ export const MembersDirectoryView: React.FC<MembersDirectoryViewProps> = ({
               Daftar Nama-Nama Anggota PKS
             </h1>
             <p className="text-xs sm:text-sm text-slate-300 max-w-2xl mt-0.5">
-              Direktori lengkap seluruh nama siswa dan anggota Patroli Keamanan Sekolah yang didaftarkan oleh pihak sekolah ke masing-masing kategori kegiatan.
+              {isSekolahViewer
+                ? `Daftar anggota Patroli Keamanan Sekolah yang didaftarkan oleh ${currentUser?.schoolName || currentUser?.name || 'sekolah Anda'}.`
+                : 'Direktori lengkap seluruh nama siswa dan anggota Patroli Keamanan Sekolah yang didaftarkan oleh pihak sekolah ke masing-masing kategori kegiatan.'}
             </p>
           </div>
         </div>
@@ -540,20 +558,29 @@ export const MembersDirectoryView: React.FC<MembersDirectoryViewProps> = ({
             )}
           </div>
 
-          <div className="w-full sm:w-64 shrink-0">
-            <select
-              value={selectedSchool}
-              onChange={e => setSelectedSchool(e.target.value)}
-              className="w-full py-2 px-3 border border-slate-200 rounded-xl text-xs sm:text-sm bg-white font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
-            >
-              <option value="all">Semua Pangkalan Sekolah ({uniqueSchools.length})</option>
-              {uniqueSchools.map(sch => (
-                <option key={sch} value={sch}>
-                  {sch}
-                </option>
-              ))}
-            </select>
-          </div>
+          {!isSekolahViewer ? (
+            <div className="w-full sm:w-64 shrink-0">
+              <select
+                value={selectedSchool}
+                onChange={e => setSelectedSchool(e.target.value)}
+                className="w-full py-2 px-3 border border-slate-200 rounded-xl text-xs sm:text-sm bg-white font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+              >
+                <option value="all">Semua Pangkalan Sekolah ({uniqueSchools.length})</option>
+                {uniqueSchools.map(sch => (
+                  <option key={sch} value={sch}>
+                    {sch}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div className="w-full sm:w-auto shrink-0 px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold flex items-center gap-1.5">
+              <Building2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span className="truncate max-w-[220px]">
+                {currentUser?.schoolName || currentUser?.name || 'Sekolah Anda'}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 

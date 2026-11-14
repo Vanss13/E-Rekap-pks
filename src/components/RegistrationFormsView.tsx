@@ -48,6 +48,8 @@ import {
   ActivityCategory
 } from '../lib/firebase';
 import { AppUser, CalonPksStudentItem } from '../App';
+import { compressImageFile } from '../lib/imageUtils';
+import { NetworkErrorBanner, NetworkErrorState } from './NetworkErrorBanner';
 
 export type SchoolLevel = 'SLTP' | 'SLTA';
 
@@ -160,8 +162,14 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
   const [proofFileName, setProofFileName] = useState<string>('');
   const [simulatedGatewaySuccess, setSimulatedGatewaySuccess] = useState(false);
   const [pendingSubmissionPayload, setPendingSubmissionPayload] = useState<any>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submittingAction, setSubmittingAction] = useState<'save_later' | 'pay_now' | 'pay_modal' | null>(null);
+  const isSubmitting = submittingAction !== null;
+  const [networkError, setNetworkError] = useState<NetworkErrorState | null>(null);
   const [collapsedStudents, setCollapsedStudents] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setNetworkError(null);
+  }, [currentTab, viewMode]);
 
   const formatRupiah = (val: number) => {
     return new Intl.NumberFormat('id-ID', {
@@ -335,12 +343,9 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
   };
 
   // Action: Simpan Dulu (Bayar Nanti)
-  const handleSaveForLater = async () => {
-    const payload = getFormSubmissionPayload();
-    if (!payload) return;
-
-    payload.paymentStatus = 'unpaid';
-    setIsSubmitting(true);
+  const submitDraftPayload = async (payload: RegistrationSubmission) => {
+    setSubmittingAction('save_later');
+    setNetworkError(null);
     try {
       const res = await saveRegistrationToCloud(payload);
       if (res.success) {
@@ -355,10 +360,51 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
         );
         setViewMode('my_submissions');
       } else {
+        setNetworkError({
+          title: 'Gagal Menyimpan Draf Pendaftaran ke Cloud',
+          message: res.error || 'Terjadi gangguan jaringan saat mengirim data pendaftaran.',
+          isNetworkError: res.isNetworkError,
+          onRetry: () => submitDraftPayload(payload)
+        });
         showToast(`Gagal menyimpan data: ${res.error}`, 'error');
       }
     } finally {
-      setIsSubmitting(false);
+      setSubmittingAction(null);
+    }
+  };
+
+  const handleSaveForLater = async () => {
+    const payload = getFormSubmissionPayload();
+    if (!payload) return;
+
+    payload.paymentStatus = 'unpaid';
+    await submitDraftPayload(payload);
+  };
+
+  const submitFreeRegistrationPayload = async (basePayload: RegistrationSubmission) => {
+    setSubmittingAction('pay_now');
+    setNetworkError(null);
+    try {
+      const res = await saveRegistrationToCloud(basePayload);
+      if (res.success) {
+        onLogActivity?.(
+          'registration',
+          'Kirim Pendaftaran (Gratis)',
+          `Mengirim formulir ${basePayload.formTitle} untuk "${basePayload.applicantName}" (${basePayload.schoolName}).`
+        );
+        showToast(`Pendaftaran "${basePayload.formTitle}" untuk "${basePayload.applicantName}" berhasil dikirim ke panitia!`, 'success');
+        setViewMode('my_submissions');
+      } else {
+        setNetworkError({
+          title: 'Gagal Mengirim Formulir Pendaftaran ke Cloud',
+          message: res.error || 'Terjadi gangguan jaringan saat mengirim formulir pendaftaran.',
+          isNetworkError: res.isNetworkError,
+          onRetry: () => submitFreeRegistrationPayload(basePayload)
+        });
+        showToast(`Gagal mengirim pendaftaran: ${res.error}`, 'error');
+      }
+    } finally {
+      setSubmittingAction(null);
     }
   };
 
@@ -371,27 +417,10 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
 
     if (fee === 0) {
       // Free form -> save immediately
-      (async () => {
-        setIsSubmitting(true);
-        try {
-          const res = await saveRegistrationToCloud(basePayload);
-          if (res.success) {
-            onLogActivity?.(
-              'registration',
-              'Kirim Pendaftaran (Gratis)',
-              `Mengirim formulir ${basePayload.formTitle} untuk "${basePayload.applicantName}" (${basePayload.schoolName}).`
-            );
-            showToast(`Pendaftaran "${basePayload.formTitle}" untuk "${basePayload.applicantName}" berhasil dikirim ke panitia!`, 'success');
-            setViewMode('my_submissions');
-          } else {
-            showToast(`Gagal mengirim pendaftaran: ${res.error}`, 'error');
-          }
-        } finally {
-          setIsSubmitting(false);
-        }
-      })();
+      void submitFreeRegistrationPayload(basePayload);
     } else {
       // Paid form -> open payment modal
+      setNetworkError(null);
       setPendingSubmissionPayload(basePayload);
       setPayNowChoice('pay_now');
       setProofFileBase64('');
@@ -402,7 +431,7 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
   };
 
   // Proof image upload for manual bank transfer or static QRIS
-  const handleProofImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleProofImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -411,54 +440,28 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
       return;
     }
 
-    if (file.size > 3 * 1024 * 1024) {
-      showToast('Ukuran berkas maksimal 3 MB!', 'error');
+    if (file.size > 6 * 1024 * 1024) {
+      showToast('Ukuran berkas maksimal 6 MB!', 'error');
       return;
     }
 
-    setProofFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = event => {
-      setProofFileBase64(event.target?.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await compressImageFile(file, {
+        maxDimension: 1280,
+        maxDataUrlBytes: 550 * 1024
+      });
+      setProofFileName(file.name);
+      setProofFileBase64(compressed);
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal memproses foto bukti pembayaran.', 'error');
+    }
   };
 
   // Finalize Submission & Payment
-  const handleConfirmPaymentAndSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pendingSubmissionPayload) return;
-
-    setIsSubmitting(true);
+  const submitFinalPaymentPayload = async (finalSubmission: RegistrationSubmission) => {
+    setSubmittingAction('pay_modal');
+    setNetworkError(null);
     try {
-      let finalSubmission: RegistrationSubmission = { ...pendingSubmissionPayload };
-
-      if (payNowChoice === 'pay_later') {
-        finalSubmission.paymentStatus = 'unpaid';
-        finalSubmission.paymentMethod = selectedPayMethod;
-      } else {
-        finalSubmission.paymentMethod = selectedPayMethod;
-
-        if (selectedPayMethod === 'bank_transfer' || selectedPayMethod === 'qris') {
-          if (!proofFileBase64) {
-            showToast('Harap unggah foto bukti transfer atau struk scan QRIS!', 'error');
-            setIsSubmitting(false);
-            return;
-          }
-          finalSubmission.paymentStatus = 'pending_verification';
-          finalSubmission.paymentProofUrl = proofFileBase64;
-          finalSubmission.paymentProofFileName = proofFileName;
-          finalSubmission.paymentDate = new Date().toLocaleString('id-ID');
-        } else {
-          // Midtrans or Ratapay Gateway
-          finalSubmission.paymentStatus = 'pending_verification';
-          finalSubmission.paymentReference = `${selectedPayMethod.toUpperCase()}-${Date.now()}`;
-          finalSubmission.paymentDate = new Date().toLocaleString('id-ID');
-        }
-      }
-
-      finalSubmission.updatedAt = new Date().toISOString();
-
       const res = await saveRegistrationToCloud(finalSubmission);
       if (res.success) {
         onLogActivity?.(
@@ -476,13 +479,58 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
         setPendingSubmissionPayload(null);
         setViewMode('my_submissions');
       } else {
+        setNetworkError({
+          title: 'Gagal Menyimpan Pendaftaran ke Cloud',
+          message: res.error || 'Terjadi gangguan jaringan saat mengirim formulir & pembayaran.',
+          isNetworkError: res.isNetworkError,
+          onRetry: () => submitFinalPaymentPayload(finalSubmission)
+        });
         showToast(`Gagal menyimpan ke Cloud: ${res.error}`, 'error');
       }
     } catch (err: any) {
+      setNetworkError({
+        title: 'Gagal Menyimpan Pendaftaran',
+        message: err?.message || 'Terjadi kesalahan jaringan saat mengirim data.',
+        isNetworkError: true,
+        onRetry: () => submitFinalPaymentPayload(finalSubmission)
+      });
       showToast(`Terjadi kesalahan: ${err.message}`, 'error');
     } finally {
-      setIsSubmitting(false);
+      setSubmittingAction(null);
     }
+  };
+
+  const handleConfirmPaymentAndSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingSubmissionPayload) return;
+
+    let finalSubmission: RegistrationSubmission = { ...pendingSubmissionPayload };
+
+    if (payNowChoice === 'pay_later') {
+      finalSubmission.paymentStatus = 'unpaid';
+      finalSubmission.paymentMethod = selectedPayMethod;
+    } else {
+      finalSubmission.paymentMethod = selectedPayMethod;
+
+      if (selectedPayMethod === 'bank_transfer' || selectedPayMethod === 'qris') {
+        if (!proofFileBase64) {
+          showToast('Harap unggah foto bukti transfer atau struk scan QRIS!', 'error');
+          return;
+        }
+        finalSubmission.paymentStatus = 'pending_verification';
+        finalSubmission.paymentProofUrl = proofFileBase64;
+        finalSubmission.paymentProofFileName = proofFileName;
+        finalSubmission.paymentDate = new Date().toLocaleString('id-ID');
+      } else {
+        // Midtrans or Ratapay Gateway
+        finalSubmission.paymentStatus = 'pending_verification';
+        finalSubmission.paymentReference = `${selectedPayMethod.toUpperCase()}-${Date.now()}`;
+        finalSubmission.paymentDate = new Date().toLocaleString('id-ID');
+      }
+    }
+
+    finalSubmission.updatedAt = new Date().toISOString();
+    await submitFinalPaymentPayload(finalSubmission);
   };
 
   const isSavingCloud = isSubmitting;
@@ -754,6 +802,11 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
 
       {viewMode === 'form' ? (
         <>
+          <NetworkErrorBanner
+            error={networkError}
+            onDismiss={() => setNetworkError(null)}
+            className="no-print"
+          />
           {/* FEE SUMMARY BANNER */}
           <div className="no-print bg-linear-to-r from-blue-50 via-indigo-50 to-white p-4 sm:p-5 rounded-2xl border border-blue-200/80 shadow-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
             <div className="space-y-1">
@@ -1284,10 +1337,19 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
                           type="button"
                           onClick={handleSaveForLater}
                           disabled={isSubmitting}
-                          className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer shadow-xs"
+                          className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-200 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer shadow-xs"
                         >
-                          <Save className="w-4 h-4 text-slate-400" />
-                          <span>Simpan Dulu (Bayar Nanti)</span>
+                          {submittingAction === 'save_later' ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin text-slate-300" />
+                              <span>Menyimpan...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Save className="w-4 h-4 text-slate-400" />
+                              <span>Simpan Dulu (Bayar Nanti)</span>
+                            </>
+                          )}
                         </button>
 
                         <button
@@ -1688,10 +1750,19 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
                             type="button"
                             onClick={handleSaveForLater}
                             disabled={isSubmitting}
-                            className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                            className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-60 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
                           >
-                            <Save className="w-3.5 h-3.5 text-slate-500" />
-                            <span>Simpan Dulu (Bayar Nanti)</span>
+                            {submittingAction === 'save_later' ? (
+                              <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                                <span>Menyimpan...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Save className="w-3.5 h-3.5 text-slate-500" />
+                                <span>Simpan Dulu (Bayar Nanti)</span>
+                              </>
+                            )}
                           </button>
 
                           <button
@@ -1924,10 +1995,19 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
                           type="button"
                           onClick={handleSaveForLater}
                           disabled={isSubmitting}
-                          className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer shadow-xs"
+                          className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-200 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer shadow-xs"
                         >
-                          <Save className="w-4 h-4 text-slate-400" />
-                          <span>Simpan Dulu (Bayar Nanti)</span>
+                          {submittingAction === 'save_later' ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin text-slate-300" />
+                              <span>Menyimpan...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Save className="w-4 h-4 text-slate-400" />
+                              <span>Simpan Dulu (Bayar Nanti)</span>
+                            </>
+                          )}
                         </button>
 
                         <button
@@ -2147,10 +2227,19 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
                           type="button"
                           onClick={handleSaveForLater}
                           disabled={isSubmitting}
-                          className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer shadow-xs"
+                          className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-200 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer shadow-xs"
                         >
-                          <Save className="w-4 h-4 text-slate-400" />
-                          <span>Simpan Dulu (Bayar Nanti)</span>
+                          {submittingAction === 'save_later' ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin text-slate-300" />
+                              <span>Menyimpan...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Save className="w-4 h-4 text-slate-400" />
+                              <span>Simpan Dulu (Bayar Nanti)</span>
+                            </>
+                          )}
                         </button>
 
                         <button
@@ -2963,10 +3052,19 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
             type="button"
             onClick={handleSaveForLater}
             disabled={isSubmitting}
-            className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+            className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
           >
-            <Save className="w-4 h-4 text-slate-400" />
-            <span>Simpan Dulu (Bayar Nanti)</span>
+            {submittingAction === 'save_later' ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin text-slate-300" />
+                <span>Menyimpan...</span>
+              </>
+            ) : (
+              <>
+                <Save className="w-4 h-4 text-slate-400" />
+                <span>Simpan Dulu (Bayar Nanti)</span>
+              </>
+            )}
           </button>
 
           <button
@@ -3224,8 +3322,12 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
           </div>
           <button
             type="button"
-            onClick={() => setPaymentModalOpen(false)}
-            className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+            disabled={isSubmitting}
+            onClick={() => {
+              setNetworkError(null);
+              setPaymentModalOpen(false);
+            }}
+            className="p-1 rounded-lg hover:bg-slate-800 disabled:opacity-50 text-slate-400 hover:text-white transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -3233,6 +3335,7 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
 
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto space-y-4 text-xs text-slate-700">
+          <NetworkErrorBanner error={networkError} onDismiss={() => setNetworkError(null)} />
           {/* Bill Summary Banner */}
           <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-center justify-between">
             <div>
@@ -3557,8 +3660,12 @@ export const RegistrationFormsView: React.FC<RegistrationFormsViewProps> = ({
         <div className="bg-slate-100 px-5 py-3.5 flex items-center justify-between gap-3 border-t border-slate-200 shrink-0">
           <button
             type="button"
-            onClick={() => setPaymentModalOpen(false)}
-            className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-200 transition cursor-pointer"
+            disabled={isSubmitting}
+            onClick={() => {
+              setNetworkError(null);
+              setPaymentModalOpen(false);
+            }}
+            className="px-4 py-2 border border-slate-300 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-200 disabled:opacity-50 transition cursor-pointer"
           >
             Batal
           </button>

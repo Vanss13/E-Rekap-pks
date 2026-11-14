@@ -8,8 +8,11 @@ import {
   getDocFromServer,
   setDoc,
   deleteDoc,
+  deleteField,
   collection,
-  onSnapshot
+  onSnapshot,
+  disableNetwork,
+  enableNetwork
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -126,7 +129,7 @@ export async function testConnection(): Promise<boolean> {
 
 // 1. PARTICIPANTS (Peserta Lomba)
 export function subscribeToParticipants(
-  onUpdate: (participants: any[]) => void,
+  onUpdate: (participants: any[], fromCache?: boolean) => void,
   onError?: (err: any) => void
 ) {
   const path = 'participants';
@@ -137,7 +140,7 @@ export function subscribeToParticipants(
       snapshot.forEach(docSnap => {
         items.push(docSnap.data());
       });
-      onUpdate(items);
+      onUpdate(items, snapshot.metadata.fromCache);
     },
     error => {
       handleFirestoreError(error, OperationType.LIST, path);
@@ -146,38 +149,274 @@ export function subscribeToParticipants(
   );
 }
 
-export async function saveParticipantToCloud(participant: any): Promise<{ success: boolean; error?: string }> {
+export interface CloudWriteResult {
+  success: boolean;
+  error?: string;
+  isNetworkError?: boolean;
+  isQuotaError?: boolean;
+}
+
+const CLOUD_WRITE_TIMEOUT_MS = 10000;
+const QUOTA_EXCEEDED_USER_MSG =
+  'Kuota tulis harian Cloud Firestore telah tercapai. Kuota akan direset otomatis keesokan harinya. Perubahan tetap disimpan secara lokal di perangkat ini.';
+
+let writeQuotaExceeded = false;
+const quotaListeners = new Set<(exceeded: boolean) => void>();
+const pendingQuotaAbortRejectors = new Set<(err: Error) => void>();
+let quotaConsoleObserverInstalled = false;
+
+export function isQuotaExceededError(error: unknown): boolean {
+  const raw = error instanceof Error ? error.message : String(error || '');
+  const lower = raw.toLowerCase();
+  return (
+    lower.includes('quota') ||
+    lower.includes('free daily write') ||
+    lower.includes('free daily read') ||
+    lower.includes('write units per project') ||
+    lower.includes('read units per project')
+  );
+}
+
+export function isCloudWriteQuotaExceeded(): boolean {
+  return writeQuotaExceeded;
+}
+
+export function subscribeToCloudQuota(listener: (exceeded: boolean) => void): () => void {
+  quotaListeners.add(listener);
+  listener(writeQuotaExceeded);
+  return () => {
+    quotaListeners.delete(listener);
+  };
+}
+
+export function markCloudWriteQuotaExceeded(): void {
+  if (!writeQuotaExceeded) {
+    writeQuotaExceeded = true;
+    quotaListeners.forEach(cb => {
+      try {
+        cb(true);
+      } catch {
+        // ignore listener errors
+      }
+    });
+  }
+
+  // Abort any in-flight mutation waiting on Firestore's retry stream
+  if (pendingQuotaAbortRejectors.size > 0) {
+    const quotaErr = new Error('Quota limit exceeded (Free daily write units per project).');
+    const rejectors = Array.from(pendingQuotaAbortRejectors);
+    pendingQuotaAbortRejectors.clear();
+    rejectors.forEach(reject => {
+      try {
+        reject(quotaErr);
+      } catch {
+        // ignore
+      }
+    });
+  }
+
+  // Pause Firestore background retry stream so SDK stops "Using maximum backoff delay" loops
+  void disableNetwork(db).catch(() => undefined);
+}
+
+export async function resetCloudWriteQuotaGuard(): Promise<void> {
+  writeQuotaExceeded = false;
+  quotaListeners.forEach(cb => {
+    try {
+      cb(false);
+    } catch {
+      // ignore
+    }
+  });
+  try {
+    await enableNetwork(db);
+  } catch {
+    // ignore
+  }
+}
+
+function installFirestoreQuotaObserver(): void {
+  if (quotaConsoleObserverInstalled || typeof console === 'undefined') return;
+  quotaConsoleObserverInstalled = true;
+
+  const inspectArgs = (args: unknown[]) => {
+    try {
+      if (!args || args.length === 0) return;
+      const joined = args.map(a => (typeof a === 'string' ? a : String(a || ''))).join(' ');
+      const lower = joined.toLowerCase();
+      if (
+        lower.includes('@firebase/firestore') &&
+        (lower.includes('quota limit exceeded') ||
+          lower.includes('free daily write units') ||
+          lower.includes('free daily read units'))
+      ) {
+        markCloudWriteQuotaExceeded();
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const origError = console.error.bind(console);
+  console.error = (...args: unknown[]) => {
+    inspectArgs(args);
+    origError(...args);
+  };
+
+  const origWarn = console.warn.bind(console);
+  console.warn = (...args: unknown[]) => {
+    inspectArgs(args);
+    origWarn(...args);
+  };
+}
+
+installFirestoreQuotaObserver();
+
+export function classifyCloudError(
+  error: unknown
+): { message: string; isNetworkError: boolean; isQuotaError: boolean } {
+  const raw = error instanceof Error ? error.message : String(error || '');
+  const lower = raw.toLowerCase();
+
+  // Check quota errors BEFORE generic resource-exhausted so daily write quota is never mislabeled as 1 MB payload size
+  if (isQuotaExceededError(error)) {
+    return {
+      message: QUOTA_EXCEEDED_USER_MSG,
+      isNetworkError: false,
+      isQuotaError: true
+    };
+  }
+
+  if (
+    (typeof navigator !== 'undefined' && !navigator.onLine) ||
+    lower.includes('offline') ||
+    lower.includes('network') ||
+    lower.includes('failed to fetch') ||
+    lower.includes('unavailable') ||
+    lower.includes('timeout') ||
+    lower.includes('deadline-exceeded')
+  ) {
+    return {
+      message: 'Gangguan jaringan atau koneksi internet terputus. Data belum terkirim ke server Cloud. Periksa koneksi Anda lalu klik Coba Lagi.',
+      isNetworkError: true,
+      isQuotaError: false
+    };
+  }
+
+  if (lower.includes('permission-denied') || lower.includes('insufficient permissions')) {
+    return {
+      message: 'Akses penyimpanan Cloud ditolak oleh aturan keamanan server.',
+      isNetworkError: false,
+      isQuotaError: false
+    };
+  }
+
+  if (
+    lower.includes('resource-exhausted') ||
+    lower.includes('longer than 1048487') ||
+    lower.includes('maximum allowed size') ||
+    lower.includes('payload too large')
+  ) {
+    return {
+      message: 'Ukuran berkas atau foto terlalu besar untuk disimpan ke Cloud (maks. 1 MB). Silakan pilih gambar yang lebih kecil.',
+      isNetworkError: false,
+      isQuotaError: false
+    };
+  }
+
+  return {
+    message: raw || 'Terjadi kesalahan saat menyimpan data ke server Cloud.',
+    isNetworkError: false,
+    isQuotaError: false
+  };
+}
+
+async function executeCloudMutation(
+  operation: () => Promise<void>,
+  operationType: OperationType,
+  path: string,
+  options?: { bypassQuotaGuard?: boolean }
+): Promise<CloudWriteResult> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return {
+      success: false,
+      isNetworkError: true,
+      isQuotaError: false,
+      error: 'Perangkat sedang offline (tidak ada koneksi internet). Data belum tersimpan ke Cloud.'
+    };
+  }
+
+  if (writeQuotaExceeded && !options?.bypassQuotaGuard) {
+    return {
+      success: false,
+      isNetworkError: false,
+      isQuotaError: true,
+      error: QUOTA_EXCEEDED_USER_MSG
+    };
+  }
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let abortRejector: ((err: Error) => void) | undefined;
+
+  try {
+    await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        abortRejector = reject;
+        pendingQuotaAbortRejectors.add(reject);
+        timeoutId = setTimeout(() => {
+          reject(new Error('network timeout: Server Cloud tidak merespons dalam batas waktu.'));
+        }, CLOUD_WRITE_TIMEOUT_MS);
+      })
+    ]);
+    return { success: true };
+  } catch (error) {
+    if (isQuotaExceededError(error)) {
+      markCloudWriteQuotaExceeded();
+    } else {
+      handleFirestoreError(error, operationType, path);
+    }
+    const classified = classifyCloudError(error);
+    return {
+      success: false,
+      error: classified.message,
+      isNetworkError: classified.isNetworkError,
+      isQuotaError: classified.isQuotaError
+    };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (abortRejector) pendingQuotaAbortRejectors.delete(abortRejector);
+  }
+}
+
+export async function saveParticipantToCloud(participant: any): Promise<CloudWriteResult> {
   if (!participant || !participant.id) {
     return { success: false, error: 'ID peserta tidak valid' };
   }
   const path = `participants/${participant.id}`;
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      ...participant,
-      updatedAt: new Date().toISOString()
-    });
-    await setDoc(doc(db, 'participants', participant.id), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const cleanDoc = sanitizeForFirestore({
+    ...participant,
+    updatedAt: new Date().toISOString()
+  });
+  return executeCloudMutation(
+    () => setDoc(doc(db, 'participants', participant.id), cleanDoc),
+    OperationType.WRITE,
+    path
+  );
 }
 
-export async function deleteParticipantFromCloud(participantId: string): Promise<{ success: boolean; error?: string }> {
+export async function deleteParticipantFromCloud(participantId: string): Promise<CloudWriteResult> {
   const path = `participants/${participantId}`;
-  try {
-    await deleteDoc(doc(db, 'participants', participantId));
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.DELETE, path);
-    return { success: false, error: errInfo.error };
-  }
+  return executeCloudMutation(
+    () => deleteDoc(doc(db, 'participants', participantId)),
+    OperationType.DELETE,
+    path
+  );
 }
 
 // 2. USERS (Akun Admin, Juri, Sekolah)
 export function subscribeToUsers(
-  onUpdate: (users: any[]) => void,
+  onUpdate: (users: any[], fromCache?: boolean) => void,
   onError?: (err: any) => void
 ) {
   const path = 'users';
@@ -188,7 +427,7 @@ export function subscribeToUsers(
       snapshot.forEach(docSnap => {
         items.push(docSnap.data());
       });
-      onUpdate(items);
+      onUpdate(items, snapshot.metadata.fromCache);
     },
     error => {
       handleFirestoreError(error, OperationType.LIST, path);
@@ -197,41 +436,37 @@ export function subscribeToUsers(
   );
 }
 
-export async function saveUserToCloud(user: any): Promise<{ success: boolean; error?: string }> {
+export async function saveUserToCloud(user: any): Promise<CloudWriteResult> {
   if (!user || !user.username) {
     return { success: false, error: 'Username tidak valid' };
   }
   const cleanUsername = String(user.username).trim().toLowerCase().replace(/\s+/g, '');
   const path = `users/${cleanUsername}`;
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      ...user,
-      username: cleanUsername,
-      updatedAt: new Date().toISOString()
-    });
-    await setDoc(doc(db, 'users', cleanUsername), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const cleanDoc = sanitizeForFirestore({
+    ...user,
+    username: cleanUsername,
+    updatedAt: new Date().toISOString()
+  });
+  return executeCloudMutation(
+    () => setDoc(doc(db, 'users', cleanUsername), cleanDoc),
+    OperationType.WRITE,
+    path
+  );
 }
 
-export async function deleteUserFromCloud(username: string): Promise<{ success: boolean; error?: string }> {
+export async function deleteUserFromCloud(username: string): Promise<CloudWriteResult> {
   const cleanUsername = String(username).trim().toLowerCase().replace(/\s+/g, '');
   const path = `users/${cleanUsername}`;
-  try {
-    await deleteDoc(doc(db, 'users', cleanUsername));
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.DELETE, path);
-    return { success: false, error: errInfo.error };
-  }
+  return executeCloudMutation(
+    () => deleteDoc(doc(db, 'users', cleanUsername)),
+    OperationType.DELETE,
+    path
+  );
 }
 
 // 3. CONFIG (Kriteria & Bobot)
 export function subscribeToConfig(
-  onUpdate: (config: any) => void,
+  onUpdate: (config: any, fromCache?: boolean) => void,
   onError?: (err: any) => void
 ) {
   const path = 'config/criteria_config';
@@ -239,7 +474,7 @@ export function subscribeToConfig(
     doc(db, 'config', 'criteria_config'),
     docSnap => {
       if (docSnap.exists()) {
-        onUpdate(docSnap.data().categories);
+        onUpdate(docSnap.data().categories, docSnap.metadata.fromCache);
       }
     },
     error => {
@@ -249,20 +484,18 @@ export function subscribeToConfig(
   );
 }
 
-export async function saveConfigToCloud(categories: any): Promise<{ success: boolean; error?: string }> {
+export async function saveConfigToCloud(categories: any): Promise<CloudWriteResult> {
   const path = 'config/criteria_config';
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      id: 'criteria_config',
-      categories,
-      updatedAt: new Date().toISOString()
-    });
-    await setDoc(doc(db, 'config', 'criteria_config'), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const cleanDoc = sanitizeForFirestore({
+    id: 'criteria_config',
+    categories,
+    updatedAt: new Date().toISOString()
+  });
+  return executeCloudMutation(
+    () => setDoc(doc(db, 'config', 'criteria_config'), cleanDoc),
+    OperationType.WRITE,
+    path
+  );
 }
 
 // 4. LOGO (Pengaturan Logo Aplikasi)
@@ -285,20 +518,18 @@ export function subscribeToLogo(
   );
 }
 
-export async function saveLogoToCloud(logoUrl: string | null): Promise<{ success: boolean; error?: string }> {
+export async function saveLogoToCloud(logoUrl: string | null): Promise<CloudWriteResult> {
   const path = 'settings/global_logo';
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      id: 'global_logo',
-      logoUrl: logoUrl || '',
-      updatedAt: new Date().toISOString()
-    });
-    await setDoc(doc(db, 'settings', 'global_logo'), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const cleanDoc = sanitizeForFirestore({
+    id: 'global_logo',
+    logoUrl: logoUrl || '',
+    updatedAt: new Date().toISOString()
+  });
+  return executeCloudMutation(
+    () => setDoc(doc(db, 'settings', 'global_logo'), cleanDoc),
+    OperationType.WRITE,
+    path
+  );
 }
 
 // 5. REGISTRATIONS (Formulir Pendaftaran PKS)
@@ -323,33 +554,29 @@ export function subscribeToRegistrations(
   );
 }
 
-export async function saveRegistrationToCloud(submission: any): Promise<{ success: boolean; error?: string }> {
+export async function saveRegistrationToCloud(submission: any): Promise<CloudWriteResult> {
   if (!submission || !submission.id) {
     return { success: false, error: 'ID formulir tidak valid' };
   }
   const path = `registrations/${submission.id}`;
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      ...submission,
-      updatedAt: new Date().toISOString()
-    });
-    await setDoc(doc(db, 'registrations', submission.id), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const cleanDoc = sanitizeForFirestore({
+    ...submission,
+    updatedAt: new Date().toISOString()
+  });
+  return executeCloudMutation(
+    () => setDoc(doc(db, 'registrations', submission.id), cleanDoc),
+    OperationType.WRITE,
+    path
+  );
 }
 
-export async function deleteRegistrationFromCloud(submissionId: string): Promise<{ success: boolean; error?: string }> {
+export async function deleteRegistrationFromCloud(submissionId: string): Promise<CloudWriteResult> {
   const path = `registrations/${submissionId}`;
-  try {
-    await deleteDoc(doc(db, 'registrations', submissionId));
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.DELETE, path);
-    return { success: false, error: errInfo.error };
-  }
+  return executeCloudMutation(
+    () => deleteDoc(doc(db, 'registrations', submissionId)),
+    OperationType.DELETE,
+    path
+  );
 }
 
 // 6. APP STATUS & MAINTENANCE (Aktivasi / Nonaktivasi Aplikasi dengan Kustomisasi Teks)
@@ -395,25 +622,23 @@ export function subscribeToAppStatus(
   );
 }
 
-export async function saveAppStatusToCloud(status: AppStatusConfig): Promise<{ success: boolean; error?: string }> {
+export async function saveAppStatusToCloud(status: AppStatusConfig): Promise<CloudWriteResult> {
   const path = 'settings/app_status';
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      id: 'app_status',
-      isActive: status.isActive,
-      title: status.title,
-      message: status.message,
-      estimateTime: status.estimateTime || '',
-      contactInfo: status.contactInfo || '',
-      updatedAt: new Date().toISOString(),
-      updatedBy: status.updatedBy || 'admin'
-    });
-    await setDoc(doc(db, 'settings', 'app_status'), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const cleanDoc = sanitizeForFirestore({
+    id: 'app_status',
+    isActive: status.isActive,
+    title: status.title,
+    message: status.message,
+    estimateTime: status.estimateTime || '',
+    contactInfo: status.contactInfo || '',
+    updatedAt: new Date().toISOString(),
+    updatedBy: status.updatedBy || 'admin'
+  });
+  return executeCloudMutation(
+    () => setDoc(doc(db, 'settings', 'app_status'), cleanDoc),
+    OperationType.WRITE,
+    path
+  );
 }
 
 // 7. PAYMENT GATEWAY & REGISTRATION FEE CONFIGURATION
@@ -592,20 +817,18 @@ export function subscribeToPaymentConfig(
   );
 }
 
-export async function savePaymentConfigToCloud(config: PaymentConfig): Promise<{ success: boolean; error?: string }> {
+export async function savePaymentConfigToCloud(config: PaymentConfig): Promise<CloudWriteResult> {
   const path = 'settings/payment_config';
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      ...config,
-      id: 'payment_config',
-      updatedAt: new Date().toISOString()
-    });
-    await setDoc(doc(db, 'settings', 'payment_config'), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const cleanDoc = sanitizeForFirestore({
+    ...config,
+    id: 'payment_config',
+    updatedAt: new Date().toISOString()
+  });
+  return executeCloudMutation(
+    () => setDoc(doc(db, 'settings', 'payment_config'), cleanDoc),
+    OperationType.WRITE,
+    path
+  );
 }
 
 // ==========================================
@@ -749,20 +972,18 @@ export function subscribeToBlankoConfig(
   );
 }
 
-export async function saveBlankoConfigToCloud(config: BlankoConfig): Promise<{ success: boolean; error?: string }> {
+export async function saveBlankoConfigToCloud(config: BlankoConfig): Promise<CloudWriteResult> {
   const path = 'settings/blanko_config';
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      ...config,
-      id: 'blanko_config',
-      updatedAt: new Date().toISOString()
-    });
-    await setDoc(doc(db, 'settings', 'blanko_config'), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.WRITE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const cleanDoc = sanitizeForFirestore({
+    ...config,
+    id: 'blanko_config',
+    updatedAt: new Date().toISOString()
+  });
+  return executeCloudMutation(
+    () => setDoc(doc(db, 'settings', 'blanko_config'), cleanDoc),
+    OperationType.WRITE,
+    path
+  );
 }
 
 // ==========================================
@@ -785,7 +1006,7 @@ export interface ActivityLogEntry {
   id: string;
   username: string;
   userName: string;
-  userRole: 'superadmin' | 'admin' | 'juri' | 'sekolah' | 'user';
+  userRole: 'superadmin' | 'admin' | 'juri' | 'sekolah' | 'pembina_polres' | 'user';
   actionCategory: ActivityCategory;
   actionTitle: string;
   details: string;
@@ -800,26 +1021,41 @@ export interface ActivityLogEntry {
   userAgent?: string | null;
 }
 
+const ACTIVITY_LOGS_DOC_ID = 'activity_logs_store';
+const ACTIVITY_LOGS_DOC_PATH = `settings/${ACTIVITY_LOGS_DOC_ID}`;
+const MAX_CLOUD_ACTIVITY_LOGS = 800;
+
 export function subscribeToActivityLogs(
   onUpdate: (logs: ActivityLogEntry[]) => void,
   onError?: (err: any) => void
 ) {
-  const path = 'activity_logs';
   return onSnapshot(
-    collection(db, path),
-    snapshot => {
+    doc(db, 'settings', ACTIVITY_LOGS_DOC_ID),
+    docSnap => {
+      if (!docSnap.exists()) {
+        onUpdate([]);
+        return;
+      }
+      const data = docSnap.data();
+      const entriesMap = data?.entries && typeof data.entries === 'object' ? data.entries : {};
       const items: ActivityLogEntry[] = [];
-      snapshot.forEach(docSnap => {
-        const data = docSnap.data() as ActivityLogEntry;
-        if (data && data.id && data.username) {
-          items.push(data);
+      Object.values(entriesMap).forEach((raw: any) => {
+        if (raw && raw.id && raw.username) {
+          items.push(raw as ActivityLogEntry);
         }
       });
       items.sort((a, b) => (b.timestampIso || '').localeCompare(a.timestampIso || ''));
-      onUpdate(items);
+
+      // Keep single document safely below Firestore 1MB limit by trimming oldest records if needed
+      if (!docSnap.metadata.fromCache && !writeQuotaExceeded && items.length > MAX_CLOUD_ACTIVITY_LOGS + 100) {
+        const overflowIds = items.slice(MAX_CLOUD_ACTIVITY_LOGS).map(item => item.id);
+        void deleteActivityLogsBatchFromCloud(overflowIds);
+      }
+
+      onUpdate(items.slice(0, MAX_CLOUD_ACTIVITY_LOGS));
     },
     error => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      handleFirestoreError(error, OperationType.GET, ACTIVITY_LOGS_DOC_PATH);
       if (onError) onError(error);
     }
   );
@@ -827,50 +1063,112 @@ export function subscribeToActivityLogs(
 
 export async function saveActivityLogToCloud(
   entry: ActivityLogEntry
-): Promise<{ success: boolean; error?: string }> {
+): Promise<CloudWriteResult> {
   if (!entry || !entry.id || !entry.username) {
     return { success: false, error: 'Log aktivitas tidak valid' };
   }
-  const path = `activity_logs/${entry.id}`;
-  try {
-    const cleanDoc = sanitizeForFirestore({
-      id: String(entry.id).slice(0, 128),
-      username: String(entry.username).slice(0, 100),
-      userName: String(entry.userName || entry.username).slice(0, 150),
-      userRole: entry.userRole,
-      actionCategory: entry.actionCategory,
-      actionTitle: String(entry.actionTitle).slice(0, 150),
-      details: String(entry.details || '').slice(0, 500),
-      tabContext: String(entry.tabContext || 'dashboard').slice(0, 80),
-      locationStatus: entry.locationStatus,
-      latitude: typeof entry.latitude === 'number' ? entry.latitude : null,
-      longitude: typeof entry.longitude === 'number' ? entry.longitude : null,
-      accuracy: typeof entry.accuracy === 'number' ? entry.accuracy : null,
-      dateLabel: String(entry.dateLabel).slice(0, 20),
-      timeLabel: String(entry.timeLabel).slice(0, 20),
-      timestampIso: String(entry.timestampIso).slice(0, 50),
-      userAgent: entry.userAgent ? String(entry.userAgent).slice(0, 200) : ''
-    });
-    await setDoc(doc(db, 'activity_logs', cleanDoc.id), cleanDoc);
-    return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.CREATE, path);
-    return { success: false, error: errInfo.error };
-  }
+  const safeId = String(entry.id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  const cleanDoc = sanitizeForFirestore({
+    id: safeId,
+    username: String(entry.username).slice(0, 100),
+    userName: String(entry.userName || entry.username).slice(0, 150),
+    userRole: entry.userRole,
+    actionCategory: entry.actionCategory,
+    actionTitle: String(entry.actionTitle).slice(0, 150),
+    details: String(entry.details || '').slice(0, 500),
+    tabContext: String(entry.tabContext || 'dashboard').slice(0, 80),
+    locationStatus: entry.locationStatus,
+    latitude: typeof entry.latitude === 'number' ? entry.latitude : null,
+    longitude: typeof entry.longitude === 'number' ? entry.longitude : null,
+    accuracy: typeof entry.accuracy === 'number' ? entry.accuracy : null,
+    dateLabel: String(entry.dateLabel).slice(0, 20),
+    timeLabel: String(entry.timeLabel).slice(0, 20),
+    timestampIso: String(entry.timestampIso).slice(0, 50),
+    userAgent: entry.userAgent ? String(entry.userAgent).slice(0, 200) : ''
+  });
+  return executeCloudMutation(
+    () =>
+      setDoc(
+        doc(db, 'settings', ACTIVITY_LOGS_DOC_ID),
+        {
+          id: ACTIVITY_LOGS_DOC_ID,
+          updatedAt: new Date().toISOString(),
+          entries: {
+            [safeId]: cleanDoc
+          }
+        },
+        { merge: true }
+      ),
+    OperationType.WRITE,
+    ACTIVITY_LOGS_DOC_PATH
+  );
 }
 
 export async function deleteActivityLogFromCloud(
   logId: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<CloudWriteResult> {
   if (!logId) return { success: false, error: 'ID log tidak valid' };
-  const path = `activity_logs/${logId}`;
-  try {
-    await deleteDoc(doc(db, 'activity_logs', logId));
+  const safeId = String(logId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  return executeCloudMutation(
+    () =>
+      setDoc(
+        doc(db, 'settings', ACTIVITY_LOGS_DOC_ID),
+        {
+          id: ACTIVITY_LOGS_DOC_ID,
+          updatedAt: new Date().toISOString(),
+          entries: {
+            [safeId]: deleteField()
+          }
+        },
+        { merge: true }
+      ),
+    OperationType.DELETE,
+    ACTIVITY_LOGS_DOC_PATH
+  );
+}
+
+export async function deleteActivityLogsBatchFromCloud(
+  logIds: string[]
+): Promise<CloudWriteResult> {
+  if (!Array.isArray(logIds) || logIds.length === 0) {
     return { success: true };
-  } catch (error) {
-    const errInfo = handleFirestoreError(error, OperationType.DELETE, path);
-    return { success: false, error: errInfo.error };
   }
+  const entriesPatch: Record<string, any> = {};
+  logIds.forEach(rawId => {
+    if (!rawId) return;
+    const safeId = String(rawId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+    entriesPatch[safeId] = deleteField();
+  });
+  if (Object.keys(entriesPatch).length === 0) {
+    return { success: true };
+  }
+  return executeCloudMutation(
+    () =>
+      setDoc(
+        doc(db, 'settings', ACTIVITY_LOGS_DOC_ID),
+        {
+          id: ACTIVITY_LOGS_DOC_ID,
+          updatedAt: new Date().toISOString(),
+          entries: entriesPatch
+        },
+        { merge: true }
+      ),
+    OperationType.DELETE,
+    ACTIVITY_LOGS_DOC_PATH
+  );
+}
+
+export async function deleteAllActivityLogsFromCloud(): Promise<CloudWriteResult> {
+  return executeCloudMutation(
+    () =>
+      setDoc(doc(db, 'settings', ACTIVITY_LOGS_DOC_ID), {
+        id: ACTIVITY_LOGS_DOC_ID,
+        updatedAt: new Date().toISOString(),
+        entries: {}
+      }),
+    OperationType.DELETE,
+    ACTIVITY_LOGS_DOC_PATH
+  );
 }
 
 

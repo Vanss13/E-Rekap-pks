@@ -17,6 +17,7 @@ interface CloudSyncModalProps {
   isOpen: boolean;
   onClose: () => void;
   cloudStatus: 'connecting' | 'connected' | 'offline' | 'error';
+  cloudQuotaExceeded?: boolean;
   lastSynced: Date | null;
   pesertaCount: number;
   usersCount: number;
@@ -28,6 +29,7 @@ export const CloudSyncModal: React.FC<CloudSyncModalProps> = ({
   isOpen,
   onClose,
   cloudStatus,
+  cloudQuotaExceeded = false,
   lastSynced,
   pesertaCount,
   usersCount,
@@ -83,13 +85,17 @@ export const CloudSyncModal: React.FC<CloudSyncModalProps> = ({
         <div className="p-5 sm:p-6 space-y-4">
           {/* Connection Status Banner */}
           <div className={`p-4 rounded-xl border flex items-center gap-3 ${
-            cloudStatus === 'connected'
+            cloudQuotaExceeded
+              ? 'bg-amber-50 border-amber-300 text-amber-950'
+              : cloudStatus === 'connected'
               ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
               : cloudStatus === 'connecting'
               ? 'bg-amber-50 border-amber-200 text-amber-900'
               : 'bg-rose-50 border-rose-200 text-rose-900'
           }`}>
-            {cloudStatus === 'connected' ? (
+            {cloudQuotaExceeded ? (
+              <AlertCircle className="w-6 h-6 text-amber-600 shrink-0" />
+            ) : cloudStatus === 'connected' ? (
               <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" />
             ) : cloudStatus === 'connecting' ? (
               <RefreshCw className="w-6 h-6 text-amber-600 animate-spin shrink-0" />
@@ -98,17 +104,27 @@ export const CloudSyncModal: React.FC<CloudSyncModalProps> = ({
             )}
             <div>
               <h4 className="font-bold text-sm">
-                {cloudStatus === 'connected'
+                {cloudQuotaExceeded
+                  ? 'Kuota Tulis Harian Cloud Tercapai'
+                  : cloudStatus === 'connected'
                   ? 'Cloud Database Aktif & Terhubung'
                   : cloudStatus === 'connecting'
                   ? 'Sedang Menghubungkan ke Cloud...'
                   : 'Mode Offline / Terputus'}
               </h4>
               <p className="text-xs mt-0.5 opacity-90">
-                {cloudStatus === 'connected'
+                {cloudQuotaExceeded
+                  ? 'Batas tulis gratis harian Cloud Firestore telah penuh dan akan direset otomatis besok. Data tetap aman disimpan di penyimpanan lokal perangkat ini.'
+                  : cloudStatus === 'connected'
                   ? 'Semua perubahan data tersimpan ke Google Cloud secara otomatis dan tersinkronisasi seketika.'
                   : 'Sistem tetap menyimpan data secara lokal dan akan menyinkronkannya saat online.'}
               </p>
+              {cloudQuotaExceeded && (
+                <p className="text-[11px] mt-1.5 font-semibold text-amber-900">
+                  Info kuota (kolom Spark / Enterprise edition):{' '}
+                  <span className="underline">https://firebase.google.com/pricing#cloud-firestore</span>
+                </p>
+              )}
             </div>
           </div>
 
